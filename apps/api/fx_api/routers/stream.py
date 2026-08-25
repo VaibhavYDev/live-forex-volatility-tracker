@@ -19,10 +19,11 @@ from datetime import UTC, datetime
 
 import pydantic
 import structlog
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-from fx_api.deps import get_manager, get_settings, get_tickets
+from fx_api.deps import get_manager, get_redis, get_settings, get_tickets
+from fx_api.ratelimit import client_id, hit
 from fx_api.ws.conflator import SLOW_DISCONNECTS, ClientSession
 from fx_api.ws.protocol import (
     MAX_SYMBOLS_PER_CLIENT,
@@ -38,15 +39,30 @@ router = APIRouter(tags=["stream"])
 
 
 @router.post("/ws/ticket")
-async def issue_ticket() -> JSONResponse:
+async def issue_ticket(request: Request) -> JSONResponse:
     """Exchange an authenticated HTTP request for a 30-second WebSocket ticket.
 
     Anonymous here because the demo has no user model yet; wire real auth in and
     only the ``subject`` changes. See ``fx_api/ws/tickets.py`` for why this
     endpoint exists rather than a header on the WebSocket itself.
+
+    Rate limited because it writes to Redis and is reachable without credentials:
+    the limit bounds what an unauthenticated caller can cost us. It does not make
+    the feed private, and SECURITY.md says so rather than implying otherwise.
     """
     tickets = get_tickets()
     settings = get_settings()
+
+    verdict = await hit(
+        get_redis(), "ticket", client_id(request), settings.ticket_limit_per_min, 60
+    )
+    if not verdict.allowed:
+        return JSONResponse(
+            {"detail": f"rate limit is {settings.ticket_limit_per_min}/min"},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(verdict.retry_after_s)},
+        )
+
     token = await tickets.issue("anonymous")
     return JSONResponse({"ticket": token, "expires_in": settings.ws_ticket_ttl_s})
 

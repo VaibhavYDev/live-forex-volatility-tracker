@@ -63,12 +63,13 @@ describe("RegimeTimeline", () => {
     mount();
 
     expect(segments()).toHaveLength(3);
-    // 30 of 120 minutes, 60 of 120, 30 of 120.
+    // 121 bars span 120 minutes of starts plus the final bar's own minute, so
+    // the window is 121 minutes: 30 normal, 60 stressed, 31 normal.
     const widths = segments().map((s) => parseFloat(s.style.flexBasis));
-    expect(widths[0]).toBeCloseTo(25, 1);
-    expect(widths[1]).toBeCloseTo(50, 1);
-    expect(widths[2]).toBeCloseTo(25, 1);
-    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(100, 1);
+    expect(widths[0]).toBeCloseTo((30 / 121) * 100, 2);
+    expect(widths[1]).toBeCloseTo((60 / 121) * 100, 2);
+    expect(widths[2]).toBeCloseTo((31 / 121) * 100, 2);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(100, 6);
   });
 
   it("totals the stressed time rather than making the reader measure a bar", () => {
@@ -119,7 +120,7 @@ describe("RegimeTimeline", () => {
 
     expect(container.querySelector(".strip__track")).toHaveAttribute("aria-hidden", "true");
     expect(container.querySelector(".sr-only")).toHaveTextContent(
-      "30 minutes normal, then 1 hour stressed, then 30 minutes normal.",
+      "30 minutes normal, then 1 hour stressed, then 31 minutes normal.",
     );
   });
 

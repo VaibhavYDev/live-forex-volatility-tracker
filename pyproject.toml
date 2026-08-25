@@ -2,6 +2,9 @@
 name = "forex-volatility-tracker"
 version = "0.1.0"
 description = "Fault-tolerant live FX volatility tracker"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fx-core",
@@ -98,4 +101,25 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["packages/core/fx_core"]
+# All four packages, not just the maths core. Scoping this to fx_core reported
+# 88% while describing 35% of the Python - and a number that only measures the
+# easiest third improves as the untested part grows, which is backwards. The
+# honest figure across everything is ~64%.
+source = [
+    "packages/core/fx_core",
+    "apps/api/fx_api",
+    "apps/ingestor/fx_ingestor",
+    "apps/worker/fx_worker",
+]
+
+[tool.coverage.report]
+# A ratchet, not a target. Raise it when the number goes up; never lower it to
+# make a build pass.
+fail_under = 60
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@overload",
+]

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useAlerts, useBars, useRegime } from "../lib/stream/hooks";
-import { humanDuration, spans } from "../lib/regime";
+import { BAR_S, humanDuration, spans } from "../lib/regime";
 
 /**
  * The last N minutes as one bar: where this pair was calm, where it was not.
@@ -27,7 +27,8 @@ export function RegimeTimeline({ symbol }: { symbol: string }) {
     // Anchored to the bars actually on screen, so the strip and the chart above
     // it cover the same minutes. Using "now minus four hours" instead would
     // drift apart from the chart the moment the feed had a gap.
-    return { segments: spans(alerts, first, last, regime), from: first, to: last };
+    const end = last + BAR_S; // through the end of the last bar, not its stamp
+    return { segments: spans(alerts, first, end, regime), from: first, to: end };
   }, [alerts, bars, regime]);
 
   if (segments.length === 0) return null;
@@ -40,7 +41,7 @@ export function RegimeTimeline({ symbol }: { symbol: string }) {
   return (
     <section className="strip" aria-labelledby="strip-h">
       <div className="strip__head">
-        <h3 id="strip-h">Regime, last {humanDuration(total)}</h3>
+        <h2 id="strip-h">Regime, last {humanDuration(total)}</h2>
         <span className="strip__stat">
           {stressedFor === 0 ? "calm throughout" : `${humanDuration(stressedFor)} stressed`}
         </span>

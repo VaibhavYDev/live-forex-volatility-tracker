@@ -17,6 +17,8 @@ import contextlib
 import json
 import signal
 import sys
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
@@ -30,6 +32,12 @@ from fx_ingestor.providers import ProviderAuthError, ProviderError, build_provid
 from fx_ingestor.supervisor import BackoffPolicy, CircuitBreaker, StalenessWatchdog
 
 log = structlog.get_logger(__name__)
+
+# A session shorter than this did not work, whatever the socket said. Below it we
+# treat a clean disconnect as a failed attempt: it escalates the backoff ladder
+# and counts against the circuit breaker. See tests/unit/test_reconnect_ladder.py
+# for what this costs a provider when it is missing.
+MIN_HEALTHY_SESSION_S = 30.0
 
 
 def _provider_kwargs(cfg: IngestorSettings) -> dict[str, object]:
@@ -59,6 +67,8 @@ class Ingestor:
         self._shutdown = asyncio.Event()
         self._force_reconnect = asyncio.Event()
         self._last_status: dict[str, str] = {"state": "starting"}
+        # Injected so the ladder can be tested without spending real minutes.
+        self._monotonic: Callable[[], float] = time.monotonic
 
     async def _publish_status(self, state: str, detail: str = "") -> None:
         """Tell the UI the truth about the feed.
@@ -100,7 +110,6 @@ class Ingestor:
 
         async with provider:
             await self._publish_status("healthy")
-            self.breaker.record_success()
             self.pipeline.set_feed_stale(False)
             self._force_reconnect.clear()
 
@@ -125,9 +134,9 @@ class Ingestor:
                 await asyncio.sleep(1.0)
                 continue
 
+            started = self._monotonic()
             try:
                 await self._consume_once()
-                attempt = 0  # a clean session resets the ladder
             except ProviderAuthError as exc:
                 # Never retry a credential failure. An infinite backoff loop on a
                 # 401 looks healthy on a dashboard while ingesting nothing, and
@@ -151,9 +160,29 @@ class Ingestor:
                 attempt += 1
                 await asyncio.sleep(delay)
             else:
+                # A session that ended in milliseconds did not work, whatever the
+                # socket reported. Resetting the ladder on ANY clean return meant
+                # a provider stuck in accept-then-hangup was retried at the base
+                # delay forever - roughly four times a second, against someone
+                # else's infrastructure, with the breaker held closed by a
+                # success recorded on connect.
+                healthy = (self._monotonic() - started) >= MIN_HEALTHY_SESSION_S
+                if healthy:
+                    self.breaker.record_success()
+                    attempt = 0
+                else:
+                    self.breaker.record_failure()
+                    log.warning(
+                        "feed.session_too_short",
+                        lasted_s=round(self._monotonic() - started, 3),
+                        attempt=attempt,
+                        breaker=str(self.breaker.state),
+                    )
+
                 if not self._shutdown.is_set() and not self.lease.lost.is_set():
                     delay = self.backoff.delay(attempt)
-                    attempt += 1
+                    if not healthy:
+                        attempt += 1
                     await asyncio.sleep(delay)
 
     async def _heartbeat_loop(self) -> None:

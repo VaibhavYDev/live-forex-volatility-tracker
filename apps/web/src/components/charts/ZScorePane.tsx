@@ -142,7 +142,7 @@ export function ZScorePane({ symbol }: { symbol: string }) {
   return (
     <section className="zpane" aria-labelledby="zpane-h">
       <div className="zpane__head">
-        <h3 id="zpane-h">Z-score vs. trailing baseline</h3>
+        <h2 id="zpane-h">Z-score vs. trailing baseline</h2>
         {banded && (
           <span className="zpane__legend">
             escalate ≥ {enter} · clear ≤ {exit}

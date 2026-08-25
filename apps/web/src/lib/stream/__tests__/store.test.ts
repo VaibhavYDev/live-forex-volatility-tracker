@@ -146,6 +146,49 @@ describe("conflation", () => {
     expect(paint.mock.calls[0]?.[0].mid).toBeCloseTo(1.1 + 49e-5, 10);
   });
 
+  it("keeps draining when a chart listener throws", () => {
+    /**
+     * The flush runs inside a rAF callback, which is outside React's call stack,
+     * so no error boundary can reach it. An uncaught throw abandoned the buffer
+     * mid-drain, skipped the notify entirely, and left every OTHER symbol frozen
+     * until the next tick happened to arrive — one broken chart taking down the
+     * whole terminal by a route the boundaries cannot cover.
+     */
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const healthy = vi.fn();
+    store.onTick("EURUSD", () => {
+      throw new Error("series disposed");
+    });
+    store.onTick("GBPUSD", healthy);
+    const woken = vi.fn();
+    store.subQuote("USDJPY", woken);
+
+    store.offer(q("EURUSD", 1.09));
+    store.offer(q("GBPUSD", 1.27));
+    store.offer(q("USDJPY", 157.2));
+    expect(() => flushFrames()).not.toThrow();
+
+    expect(healthy).toHaveBeenCalledTimes(1);
+    expect(woken).toHaveBeenCalledTimes(1);
+    expect(store.quote("USDJPY")?.mid).toBe(157.2);
+    expect(store.stats.painterErrors).toBe(1);
+    quiet.mockRestore();
+  });
+
+  it("returns to idle after a listener throws", () => {
+    // The buffer must still be cleared, or the same throw repeats every frame.
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    store.onTick("EURUSD", () => {
+      throw new Error("boom");
+    });
+    store.offer(q("EURUSD", 1.09));
+    flushFrames();
+
+    expect(pendingFrames()).toBe(0);
+    expect(store.pendingFrame).toBe(false);
+    quiet.mockRestore();
+  });
+
   it("costs an unmounted symbol nothing but a failed lookup", () => {
     const paint = vi.fn();
     const off = store.onTick("EURUSD", paint);

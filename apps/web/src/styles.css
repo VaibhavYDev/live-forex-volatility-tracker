@@ -290,16 +290,81 @@ body {
 }
 
 /* ----------------------------------------------------------------- main --- */
-main {
+.panels {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 350px;
   gap: 16px;
   align-items: start;
 }
 @media (max-width: 940px) {
-  main {
+  .panels {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* The panel is a focus target for the skip link and for tab activation, but it
+   is a container, not a control — an outline around the entire grid reads as a
+   rendering bug rather than as focus. */
+.panels:focus {
+  outline: none;
+}
+.panels:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+  border-radius: var(--r-md);
+}
+
+/* --------------------------------------------------------- skip link --- */
+.skip {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 100;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: var(--r-sm);
+  text-decoration: none;
+  /* Moved off-screen with transform rather than display:none so it stays in the
+     accessibility tree and in the tab order. */
+  transform: translateY(-200%);
+  transition: transform var(--fast) var(--ease);
+}
+.skip:focus {
+  transform: none;
+}
+
+/* ------------------------------------------------------ error boundary --- */
+.boundary {
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--down) 45%, var(--line));
+  border-radius: var(--r-md);
+}
+.boundary__title {
+  margin: 0 0 4px;
+  font-weight: 650;
+  color: var(--down);
+}
+.boundary__detail {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.boundary__retry {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+}
+.boundary__retry:hover {
+  border-color: var(--accent);
 }
 
 .card,
@@ -521,8 +586,8 @@ footer {
   justify-content: space-between;
   gap: 12px;
 }
-.zpane h3,
-.strip h3 {
+.zpane h2,
+.strip h2 {
   margin: 0 0 8px;
   font-size: 12px;
   font-weight: 650;
@@ -696,6 +761,23 @@ footer {
     transform: translate3d(24px, 0, 0);
     opacity: 0;
   }
+}
+
+.perf {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
 }
 
 /*

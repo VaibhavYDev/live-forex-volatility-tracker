@@ -40,10 +40,38 @@ export function ToastStack() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [held, setHeld] = useState(false);
   const timers = useRef(new Map<string, number>());
+  /**
+   * Absolute expiry per toast, NOT a duration.
+   *
+   * The effect below re-runs whenever the list changes, and its cleanup clears
+   * every pending timer. Re-arming those timers from a fixed CLEAR_MS restarted
+   * each countdown from zero, so a clear toast never dismissed while other
+   * alerts kept arriving — during an actual market event, which is exactly when
+   * the stack must not grow without bound. Deadlines survive the re-arm; a
+   * duration does not.
+   */
+  const deadlines = useRef(new Map<string, number>());
+  const exits = useRef(new Set<number>());
+  const pausedAt = useRef<number | null>(null);
 
   const drop = useCallback((id: string) => {
+    deadlines.current.delete(id);
     setToasts((prev) => prev.map((x) => (x.id === id ? { ...x, leaving: true } : x)));
-    window.setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== id)), EXIT_MS);
+    const t = window.setTimeout(() => {
+      exits.current.delete(t);
+      setToasts((prev) => prev.filter((x) => x.id !== id));
+    }, EXIT_MS);
+    exits.current.add(t);
+  }, []);
+
+  // Exit timers outlive the toast they animate, so unmounting mid-animation
+  // would otherwise leave them queued against a component that is gone.
+  useEffect(() => {
+    const pending = exits.current;
+    return () => {
+      for (const t of pending) window.clearTimeout(t);
+      pending.clear();
+    };
   }, []);
 
   useAlertFeed((t) => {
@@ -54,19 +82,39 @@ export function ToastStack() {
   });
 
   useEffect(() => {
-    if (held) return; // pointer or focus is inside: every countdown is paused
-
     const live = timers.current;
+    const due = deadlines.current;
+
+    if (held) {
+      // Freeze the clock rather than the timers: on resume every deadline moves
+      // forward by exactly how long the pointer or focus was inside, so a
+      // paused toast resumes with the time it had left, not with a full budget.
+      pausedAt.current ??= performance.now();
+      return;
+    }
+
+    if (pausedAt.current !== null) {
+      const paused = performance.now() - pausedAt.current;
+      for (const [id, at] of due) due.set(id, at + paused);
+      pausedAt.current = null;
+    }
+
     for (const toast of toasts) {
       if (toast.leaving || toast.t.new_regime === "stressed" || live.has(toast.id)) continue;
+      const at = due.get(toast.id) ?? performance.now() + CLEAR_MS;
+      due.set(toast.id, at);
       live.set(
         toast.id,
-        window.setTimeout(() => {
-          live.delete(toast.id);
-          drop(toast.id);
-        }, CLEAR_MS),
+        window.setTimeout(
+          () => {
+            live.delete(toast.id);
+            drop(toast.id);
+          },
+          Math.max(0, at - performance.now()),
+        ),
       );
     }
+
     return () => {
       for (const timer of live.values()) window.clearTimeout(timer);
       live.clear();

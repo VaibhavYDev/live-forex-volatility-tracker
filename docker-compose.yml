@@ -78,6 +78,8 @@ services:
     <<: *python
     command: ["python", "-m", "fx_worker.main"]
     ports: ["9101:9101"]
+    environment:
+      FX_HEALTH_PORT: "9101"
 
   api:
     <<: *python
@@ -85,6 +87,13 @@ services:
       ["uvicorn", "fx_api.main:app", "--host", "0.0.0.0", "--port", "8000",
        "--proxy-headers", "--no-access-log"]
     ports: ["8000:8000"]
+    environment:
+      # The demo dashboard has no login, so it cannot fetch a ticket. Auth
+      # defaults to ON in code (see fx_api/config.py); this is the explicit
+      # opt-out that keeps `docker compose up` a one-command demo, and
+      # SECURITY.md records it as a local-development posture.
+      FX_REQUIRE_WS_TICKET: "0"
+      FX_HEALTH_PORT: "8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
       interval: 10s

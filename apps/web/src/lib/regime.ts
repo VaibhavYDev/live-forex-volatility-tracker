@@ -16,6 +16,14 @@ import type { Regime, Transition } from "./stream/types";
  * silently painting a plausible-looking fiction from our end.
  */
 
+/**
+ * One bar of wall-clock. The window a chart covers runs to the END of its last
+ * bar, not to that bar's opening stamp — leaving it out means an in-progress
+ * event stops being shaded exactly one bar short of the right edge, which is the
+ * most misleading place for shading to stop.
+ */
+export const BAR_S = 60;
+
 export interface Span {
   /** Epoch seconds, inclusive. */
   readonly from: number;

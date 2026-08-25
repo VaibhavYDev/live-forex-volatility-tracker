@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
 import { PriceChart } from "./components/charts/PriceChart";
 import { ZScorePane } from "./components/charts/ZScorePane";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PerfOverlay, perfRequested } from "./components/PerfOverlay";
 import { RegimeTimeline } from "./components/RegimeTimeline";
 import { StatusBanner } from "./components/StatusBanner";
 import { SymbolTab } from "./components/SymbolTab";
@@ -56,6 +58,12 @@ function Terminal() {
 
   return (
     <div className="app">
+      {/* First thing in the tab order. Five pairs plus a theme toggle is six
+          stops between the top of the page and the content on every load. */}
+      <a className="skip" href="#symbol-panel">
+        Skip to content
+      </a>
+
       <header className="masthead">
         <div>
           <h1>Live Forex Volatility Tracker</h1>
@@ -86,23 +94,46 @@ function Terminal() {
         ))}
       </div>
 
-      <main id="symbol-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
-        <div className="stack">
-          <section className="card">
-            <PriceChart symbol={active} />
-          </section>
-          <section className="card">
-            <ZScorePane symbol={active} />
-            <RegimeTimeline symbol={active} />
-          </section>
+      {/* <main> keeps its own implicit role: ARIA forbids overriding it, and
+          putting role="tabpanel" here left the page with no main landmark at
+          all. tabIndex on the panel is not decoration — it holds no focusable
+          content, so without it a keyboard user cannot reach what the tabs
+          select. */}
+      <main>
+        <div
+          id="symbol-panel"
+          role="tabpanel"
+          aria-labelledby={`tab-${active}`}
+          tabIndex={0}
+          className="panels"
+        >
+          <div className="stack">
+            <ErrorBoundary region="Price chart">
+              <section className="card">
+                <PriceChart symbol={active} />
+              </section>
+            </ErrorBoundary>
+            <ErrorBoundary region="Volatility pane">
+              <section className="card">
+                <ZScorePane symbol={active} />
+                <RegimeTimeline symbol={active} />
+              </section>
+            </ErrorBoundary>
+          </div>
+          <ErrorBoundary region="Estimator panel">
+            <VolatilityPanel symbol={active} />
+          </ErrorBoundary>
         </div>
-        <VolatilityPanel symbol={active} />
       </main>
 
       {/* Outside the tabpanel: a transition on GBPUSD matters while you are
           looking at EURUSD, and nesting it here would unmount the stack — and
           any alert still on screen — on every tab switch. */}
-      <ToastStack />
+      <ErrorBoundary region="Alerts">
+        <ToastStack />
+      </ErrorBoundary>
+
+      {perfRequested() && <PerfOverlay />}
 
       <footer>
         σ is labelled with its estimator, window and annualisation basis (252 trading days × 24h =

@@ -52,5 +52,19 @@ COPY --from=builder --chown=fx:fx /build /build
 WORKDIR /build
 USER fx
 
+# Every service in this image exposes a Prometheus endpoint - the API on 8000,
+# the ingestor on 9100, the worker on 9101 - so one probe covers all three if it
+# is told which port. Without a HEALTHCHECK the orchestrator cannot tell a wedged
+# ingestor from a working one: the process is running either way, and `depends_on`
+# will happily start dependents against a container that is up but not doing
+# anything.
+#
+# Compose overrides FX_HEALTH_PORT per service; the API additionally overrides the
+# whole check to hit /healthz, which is a real liveness answer rather than "the
+# metrics server is listening".
+ENV FX_HEALTH_PORT=9100
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
+    CMD python -c "import os,urllib.request;urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['FX_HEALTH_PORT']}/metrics\",timeout=2)" || exit 1
+
 # Overridden per service in docker-compose.yml.
 CMD ["python", "-m", "fx_api.main"]

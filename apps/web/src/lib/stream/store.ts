@@ -57,6 +57,8 @@ export interface Stats {
   /** Worst single flush. The number that decides whether we drop frames. */
   maxFlushMs: number;
   lastFlushMs: number;
+  /** Tick listeners that threw. Non-zero means a chart is broken, not the feed. */
+  painterErrors: number;
 }
 
 type TickFn = (q: Quote) => void;
@@ -86,6 +88,7 @@ export class MarketStore {
     applied: 0,
     maxFlushMs: 0,
     lastFlushMs: 0,
+    painterErrors: 0,
   };
 
   // ------------------------------------------------------------------ reads
@@ -169,7 +172,21 @@ export class MarketStore {
       this.#quotes.set(q.symbol, q);
       this.#dirty.add(qKey(q.symbol));
       const fns = this.#tickers.get(q.symbol);
-      if (fns) for (const fn of fns) fn(q);
+      if (fns) {
+        for (const fn of fns) {
+          try {
+            fn(q);
+          } catch (err) {
+            // One chart throwing must not take the feed down. This runs inside
+            // a rAF callback, which is outside React's call stack, so no error
+            // boundary can reach it: an uncaught throw here abandoned the
+            // buffer mid-drain, skipped the notify, and left every OTHER
+            // symbol's UI frozen until the next tick happened to arrive.
+            this.stats.painterErrors++;
+            console.error("[MarketStore] tick listener threw", err);
+          }
+        }
+      }
     }
     this.stats.applied += this.#buf.size;
     this.#buf.clear();
@@ -298,6 +315,7 @@ export class MarketStore {
       applied: 0,
       maxFlushMs: 0,
       lastFlushMs: 0,
+      painterErrors: 0,
     });
   }
 

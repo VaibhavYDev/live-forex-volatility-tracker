@@ -8,11 +8,13 @@ connection open.
 from __future__ import annotations
 
 import json
+import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fx_core import keys
 from fx_core.calendar import active_sessions, is_market_open, next_close, next_open
 from fx_core.models import Bar, BarSource, Estimator, VolSnapshot
@@ -24,12 +26,79 @@ from fx_core.volatility import (
     yang_zhang,
 )
 
-from fx_api.deps import get_redis
+from fx_api.deps import get_redis, get_settings
+from fx_api.ratelimit import client_id, hit
 
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["market"])
 
 _MIN_BARS = 3
+
+# Symbols reach Redis as key fragments and cache keys. Six upper-case letters is
+# every FX pair there is; the bound matters because an unvalidated symbol is an
+# unbounded set of cache entries.
+_SYMBOL = re.compile(r"^[A-Z]{6}$")
+
+
+def _symbol(raw: str) -> str:
+    s = raw.strip().upper()
+    if not _SYMBOL.match(s):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{raw!r} is not a currency pair; expected six letters, e.g. EURUSD",
+        )
+    return s
+
+
+async def _guard(request: Request, response: Response, bucket: str, limit: int) -> None:
+    verdict = await hit(get_redis(), bucket, client_id(request), limit, 60)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = str(verdict.remaining)
+    if not verdict.allowed:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"rate limit is {limit}/min for this endpoint",
+            headers={"Retry-After": str(verdict.retry_after_s)},
+        )
+
+
+class _Cache:
+    """Tiny TTL cache for computed estimator responses.
+
+    In-process rather than in Redis on purpose: what is being protected here is
+    the CPU cost of five estimators over up to 1,440 bars, and that cost is
+    per-replica. Bounded because the key includes a user-supplied symbol.
+    """
+
+    __slots__ = ("_data", "_max")
+
+    def __init__(self, max_entries: int = 256) -> None:
+        self._data: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+        self._max = max_entries
+
+    def get(self, key: tuple[str, int], ttl_s: float) -> dict[str, Any] | None:
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        stored_at, value = entry
+        if time.monotonic() - stored_at > ttl_s:
+            self._data.pop(key, None)
+            return None
+        return value
+
+    def put(self, key: tuple[str, int], value: dict[str, Any]) -> None:
+        if len(self._data) >= self._max:
+            # Oldest insertion first. dicts preserve insertion order, so this is
+            # FIFO rather than LRU - adequate for a cache whose entries all
+            # expire within 30 seconds anyway.
+            self._data.pop(next(iter(self._data)), None)
+        self._data[key] = (time.monotonic(), value)
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
+_compare_cache = _Cache()
 
 _ESTIMATORS = {
     Estimator.CLOSE_TO_CLOSE: close_to_close,
@@ -42,7 +111,8 @@ _ESTIMATORS = {
 ANNUALIZATION_BASIS = "252 trading days x 24h = 362,880 one-minute bars/year"
 
 
-async def _cached_bars(symbol: str, limit: int) -> list[Bar]:
+async def _bars_from_cache(symbol: str, limit: int) -> list[Bar]:
+    """Read sealed bars out of the Redis hot cache the ingestor maintains."""
     redis = get_redis()
     raw = await redis.zrevrange(keys.history(symbol), 0, limit - 1)
     return [
@@ -87,9 +157,10 @@ async def bars(symbol: str, limit: int = Query(default=240, ge=1, le=1440)) -> d
     served from a cache the ingestor already maintains, so a wave of reloads
     cannot become a wave of database queries.
     """
-    rows = await _cached_bars(symbol.upper(), limit)
+    sym = _symbol(symbol)
+    rows = await _bars_from_cache(sym, limit)
     return {
-        "symbol": symbol.upper(),
+        "symbol": sym,
         "bars": [
             {
                 "t": int(b.bucket.timestamp()),
@@ -119,18 +190,18 @@ async def volatility(
     An unlabelled sigma is meaningless - 0.004 could be per-tick, per-minute or
     annualised - and a finance-literate reviewer checks for exactly this.
     """
-    rows = await _cached_bars(symbol.upper(), limit)
+    sym = _symbol(symbol)
+    rows = await _bars_from_cache(sym, limit)
     if len(rows) < _MIN_BARS:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=(
-                f"not enough bars cached for {symbol.upper()} yet ({len(rows)}); "
-                "the feed is still warming up"
+                f"not enough bars cached for {sym} yet ({len(rows)}); the feed is still warming up"
             ),
         )
 
     snap = VolSnapshot.build(
-        symbol=symbol.upper(),
+        symbol=sym,
         estimator=estimator,
         window_s=len(rows) * 60,
         sigma=_ESTIMATORS[estimator](rows),
@@ -151,29 +222,51 @@ async def volatility(
 
 @router.get("/volatility/{symbol}/compare")
 async def compare_estimators(
-    symbol: str, limit: int = Query(default=60, ge=_MIN_BARS, le=1440)
+    request: Request,
+    response: Response,
+    symbol: str,
+    limit: int = Query(default=60, ge=_MIN_BARS, le=1440),
 ) -> dict[str, Any]:
     """Every estimator over the same bars, side by side.
 
     Cheap to add and it makes the argument visually: the spread between
     close-to-close and Garman-Klass on identical data IS the case for range
     estimators.
+
+    The expensive endpoint, and the only one the frontend polls: five estimators
+    over up to 1,440 bars, every 15 seconds per mounted panel. Rate limited so a
+    loop cannot monopolise the Redis every other component shares, and cached
+    because the answer cannot change until the next bar seals.
     """
-    rows = await _cached_bars(symbol.upper(), limit)
+    settings = get_settings()
+    sym = _symbol(symbol)
+    await _guard(request, response, "compare", settings.rate_limit_per_min)
+
+    key = (sym, limit)
+    cached = _compare_cache.get(key, settings.compare_cache_s)
+    if cached is not None:
+        response.headers["X-Cache"] = "hit"
+        return cached
+    response.headers["X-Cache"] = "miss"
+
+    rows = await _bars_from_cache(sym, limit)
     if len(rows) < _MIN_BARS:
+        # Deliberately not cached. "Warming up" is the one answer that becomes
+        # wrong on its own, and caching it would keep a panel blank for 30
+        # seconds after the data arrived.
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            detail=f"not enough bars cached for {symbol.upper()} yet ({len(rows)})",
+            detail=f"not enough bars cached for {sym} yet ({len(rows)})",
         )
 
-    return {
-        "symbol": symbol.upper(),
+    payload = {
+        "symbol": sym,
         "bars_used": len(rows),
         "window_s": len(rows) * 60,
         "annualization_basis": ANNUALIZATION_BASIS,
         "estimators": {
             str(est): VolSnapshot.build(
-                symbol=symbol.upper(),
+                symbol=sym,
                 estimator=est,
                 window_s=len(rows) * 60,
                 sigma=fn(rows),
@@ -183,3 +276,5 @@ async def compare_estimators(
             for est, fn in _ESTIMATORS.items()
         },
     }
+    _compare_cache.put(key, payload)
+    return payload

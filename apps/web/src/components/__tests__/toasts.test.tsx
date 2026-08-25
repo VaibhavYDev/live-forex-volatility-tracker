@@ -11,7 +11,14 @@ let store: MarketStore;
 
 beforeEach(() => {
   store = new MarketStore();
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+  // `performance` must be faked explicitly: the countdown deadlines use
+  // performance.now() because it is monotonic and Date.now() is not (an NTP
+  // correction mid-countdown would be indistinguishable from time passing).
+  // Without this the deadline clock and the timer clock diverge under test.
+  vi.useFakeTimers({
+    shouldAdvanceTime: true,
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"],
+  });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -70,6 +77,37 @@ describe("timing (WCAG 2.2.1)", () => {
 
     await user.unhover(screen.getByRole("status"));
     wait(10_500);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("does not restart the countdown when another alert arrives", async () => {
+    // The defect: the effect's cleanup cleared every pending timer whenever the
+    // list changed, and re-arming from a fixed CLEAR_MS restarted each countdown
+    // from zero. A clear toast therefore never dismissed while alerts kept
+    // arriving - during an actual market event, which is when the stack must
+    // not grow without bound. Deadlines survive the re-arm; durations do not.
+    mount();
+    fire(t(1, "normal"));
+
+    wait(7_000);
+    fire(t(2, "stressed", "GBPUSD")); // re-runs the effect
+    wait(4_000); // 11s total, so the clear is past its 10s deadline
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("resumes with the time it had left, not a fresh budget", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mount();
+    fire(t(1, "normal"));
+
+    wait(9_000);
+    await user.hover(screen.getByRole("status"));
+    wait(30_000); // paused
+    await user.unhover(screen.getByRole("status"));
+
+    wait(1_500); // only ~1s was left when it paused
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 

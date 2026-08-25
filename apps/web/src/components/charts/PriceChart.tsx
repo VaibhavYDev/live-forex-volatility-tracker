@@ -15,7 +15,7 @@
 import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import { useLiveSummary } from "../../lib/a11y";
-import { stressed } from "../../lib/regime";
+import { BAR_S, stressed } from "../../lib/regime";
 import { useAlerts, useBars, useRegime, useTicks } from "../../lib/stream/hooks";
 import type { Bar } from "../../lib/stream/types";
 import { useTheme } from "../../lib/theme";
@@ -114,6 +114,18 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
     shade.current?.applyOptions({ color: `${palette.warn}22` });
   }, [palette]);
 
+  /**
+   * The in-flight bar belongs to one symbol. Without this reset, switching to a
+   * pair that has no cached history yet left the previous pair's bar in place —
+   * the snapshot effect below returns early on an empty series and never clears
+   * it — so the next tick merged a EURUSD open, high and low with a USDJPY close
+   * and drew the result as a candle. Wrong data, rendered confidently.
+   */
+  useEffect(() => {
+    live.current = null;
+    setLast(null);
+  }, [symbol]);
+
   // Snapshot: replace the whole series in one call rather than N updates.
   useEffect(() => {
     const series = candles.current;
@@ -138,7 +150,8 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
     if (!series || bars.length === 0) return;
 
     const from = bars[0]!.t;
-    const to = bars[bars.length - 1]!.t;
+    // Through the END of the last bar; see BAR_S in lib/regime.
+    const to = bars[bars.length - 1]!.t + BAR_S;
     const hot = stressed(alerts, from, to, regime);
 
     shade.current?.setData(
