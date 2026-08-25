@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+
+.env
+.env.local
+*.local
+
+data/
+*.parquet
+
+# Scratch space for delivery tarballs. The folder itself has to go by hand:
+# the desktop bridge refuses rm inside a connected folder.
+_to_delete/

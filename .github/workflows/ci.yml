@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push: {branches: [main]}
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+      timescale:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: fx
+          POSTGRES_PASSWORD: fx
+          POSTGRES_DB: fx
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U fx" --health-interval 5s
+          --health-timeout 3s --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --all-packages --frozen
+
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check . --output-format=github
+      - name: Types (strict)
+        run: uv run mypy packages apps
+
+      - name: Apply schema
+        env: {PGPASSWORD: fx}
+        run: |
+          psql -h localhost -U fx -d fx -v ON_ERROR_STOP=1 -f infra/migrations/001_init.sql
+          psql -h localhost -U fx -d fx -v ON_ERROR_STOP=1 -f infra/migrations/003_alert_events.sql
+
+      - name: Tests
+        env:
+          TEST_REDIS_URL: redis://localhost:6379/15
+          DATABASE_URL: postgresql://fx:fx@localhost:5432/fx
+        run: uv run pytest tests -q --timeout=90 --cov --cov-report=term-missing
+
+  web:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: apps/web}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
+      - run: npm ci || npm install
+      - run: npm test
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  compose:
+    # Proves the claim on the README's first screen: `docker compose up` works.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose build --parallel
+      - name: Boot the stack and assert it becomes ready
+        run: |
+          docker compose up -d
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/readyz | grep -q '"ready":true'; then
+              echo "stack ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::stack did not become ready"; docker compose logs --tail=80; exit 1
+      - if: always()
+        run: docker compose down -v

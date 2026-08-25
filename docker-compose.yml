@@ -1,0 +1,127 @@
+# =============================================================================
+# One command, working dashboard, no API key:
+#
+#     cp .env.example .env && docker compose up
+#
+# The default provider is `replay`, a deterministic synthetic feed. A reviewer
+# who cannot run the project in sixty seconds will not read the architecture, so
+# "no signup required" is a feature, not a shortcut.
+#
+# Point it at a real feed by setting FX_PROVIDER=tiingo and FX_PROVIDER_TOKEN.
+# =============================================================================
+
+name: fx-volatility
+
+x-python: &python
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.python
+  env_file: [.env]
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql://${POSTGRES_USER:-fx}:${POSTGRES_PASSWORD:-fx}@timescale:5432/${POSTGRES_DB:-fx}
+  depends_on:
+    redis: {condition: service_healthy}
+    timescale: {condition: service_healthy}
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------- storage --
+  redis:
+    image: redis:7-alpine
+    # The config file is where the eviction-policy reasoning lives. Read it.
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  timescale:
+    # Full TimescaleDB (TSL), so continuous aggregates, native compression and
+    # retention policies all work. Supabase ships only the Apache-2 edition and
+    # has deprecated it on PG17 — see infra/migrations/002_supabase_partman.sql.
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fx}
+      POSTGRES_DB: ${POSTGRES_DB:-fx}
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      # Files in this directory run once, in lexical order, on first boot.
+      - ./infra/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./infra/migrations/003_alert_events.sql:/docker-entrypoint-initdb.d/003_alert_events.sql:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fx} -d ${POSTGRES_DB:-fx}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  # --------------------------------------------------------------- services --
+  ingestor:
+    <<: *python
+    command: ["python", "-m", "fx_ingestor.main"]
+    ports: ["9100:9100"]
+    # Deliberately 2 replicas. Only ONE will hold the Redis lease and open an
+    # upstream connection; the other sits in standby and promotes within the
+    # lease TTL. `docker compose stop` one of them and watch the logs — that is
+    # the single-writer story, demonstrable in ten seconds.
+    deploy:
+      replicas: 2
+
+  worker:
+    <<: *python
+    command: ["python", "-m", "fx_worker.main"]
+    ports: ["9101:9101"]
+
+  api:
+    <<: *python
+    command:
+      ["uvicorn", "fx_api.main:app", "--host", "0.0.0.0", "--port", "8000",
+       "--proxy-headers", "--no-access-log"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+    ports: ["5173:80"]
+    depends_on:
+      api: {condition: service_started}
+    restart: unless-stopped
+
+  # ---------------------------------------------------- observability (opt) --
+  # `docker compose --profile observability up` to include these.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: [observability]
+    volumes:
+      - ./infra/grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    volumes:
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  redis-data:
+  timescale-data:

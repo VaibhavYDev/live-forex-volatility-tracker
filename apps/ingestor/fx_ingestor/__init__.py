@@ -1,0 +1,1 @@
+"""Leader-elected upstream ingestor."""

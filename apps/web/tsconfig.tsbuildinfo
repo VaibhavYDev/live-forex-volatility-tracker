@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/components/StatusBanner.tsx","./src/components/VolatilityPanel.tsx","./src/components/charts/PriceChart.tsx","./src/hooks/useForexStream.ts","./src/lib/stream/client.ts"],"version":"5.9.3"}

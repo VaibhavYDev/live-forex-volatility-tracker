@@ -1,0 +1,716 @@
+/*
+ * First-paint defaults only. The live palette is injected by ThemeProvider into
+ * a <style id="fx-tokens"> under a [data-theme] selector, which outranks these
+ * bare :root rules whatever order Vite ends up emitting CSS in. Duplicating the
+ * values here is what keeps the page from flashing the wrong theme before React
+ * has hydrated — the one place a little duplication earns its keep.
+ */
+:root {
+  --bg: #0b0f14;
+  --surface: #11161d;
+  --surface-alt: #171e27;
+  --line: #222b36;
+  --line-strong: #2e3a48;
+  --text: #e6edf3;
+  --text-dim: #94a3b4;
+  --accent: #5aa2f7;
+  --up: #3dd68c;
+  --down: #f1707a;
+  --warn: #e8b33d;
+  --focus: #7fc1ff;
+  color-scheme: dark;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-pill: 999px;
+  --fast: 120ms;
+  --slow: 260ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-alt: #eff2f5;
+    --line: #dce1e7;
+    --line-strong: #c2cad3;
+    --text: #0e141b;
+    --text-dim: #576373;
+    --accent: #1a62cc;
+    --up: #0a7a52;
+    --down: #a3161c;
+    --warn: #8a5a00;
+    --focus: #0b4fa8;
+    color-scheme: light;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.5 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Every price on screen is a number that changes in place. Proportional digits
+   make the whole row jitter on each tick; tabular ones hold their column. */
+.tab__px,
+.quotes .v,
+.headline__big,
+.estimators .num,
+.alerts__when {
+  font-variant-numeric: tabular-nums;
+}
+
+/* One focus treatment, defined once, on the token that the contrast suite pins
+   at >3:1 against every surface. */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.app {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 28px 22px 48px;
+}
+
+/* ------------------------------------------------------------- masthead --- */
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+.masthead h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+.masthead__sub {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.masthead__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* --------------------------------------------------------------- status --- */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 13px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.status__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--up);
+}
+.status--warn .status__dot {
+  background: var(--warn);
+}
+.status--bad .status__dot {
+  background: var(--down);
+}
+.status--warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+}
+.status--bad {
+  border-color: color-mix(in srgb, var(--down) 50%, var(--line));
+}
+.status__label {
+  font-weight: 600;
+}
+.status__detail {
+  color: var(--text-dim);
+}
+
+/* A live feed should feel alive. Scaling a pseudo-element rather than animating
+   box-shadow keeps this on the compositor — box-shadow repaints every frame. */
+.status--ok .status__dot::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--up);
+  animation: pulse 2.4s var(--ease) infinite;
+}
+.status--ok .status__dot {
+  position: relative;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+/* ----------------------------------------------------------------- tabs --- */
+.tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 116px;
+  padding: 10px 14px 12px;
+  font: inherit;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition:
+    border-color var(--fast) var(--ease),
+    transform var(--fast) var(--ease);
+}
+.tab:hover {
+  border-color: var(--line-strong);
+}
+.tab:active {
+  transform: translateY(1px);
+}
+.tab[aria-selected="true"] {
+  border-color: var(--accent);
+}
+
+/* The selected state is carried by aria-selected, a border AND this rail —
+   never by colour alone (WCAG 1.4.1). scaleX keeps it off the layout path. */
+.tab::after {
+  content: "";
+  position: absolute;
+  inset: auto 14px 0 14px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--slow) var(--ease);
+}
+.tab[aria-selected="true"]::after {
+  transform: scaleX(1);
+}
+.tab[data-regime="stressed"] {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+}
+.tab__sym {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+.tab__px {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------- regime --- */
+.regime {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid currentColor;
+  border-radius: var(--r-pill);
+}
+.regime--normal {
+  color: var(--up);
+}
+.regime--stressed {
+  color: var(--warn);
+}
+.regime--unknown {
+  color: var(--text-dim);
+}
+.regime[data-compact] {
+  position: absolute;
+  top: 7px;
+  right: 9px;
+  padding: 1px 5px;
+  font-size: 9px;
+}
+.regime[data-compact] .regime__text {
+  display: none;
+}
+
+/* ----------------------------------------------------------------- main --- */
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 940px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.card,
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 14px;
+}
+.chart {
+  width: 100%;
+}
+
+/* ---------------------------------------------------------------- panel --- */
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 12px;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+.panel h3 {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+
+.quotes {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.quotes .k {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+.quotes .v {
+  font-size: 13px;
+}
+
+.headline {
+  padding: 16px 0 4px;
+  transition: opacity var(--slow) var(--ease);
+}
+.headline--warming {
+  opacity: 0.45;
+}
+.headline__big {
+  font-size: 36px;
+  font-weight: 650;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+}
+.headline__cap {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.headline__cap em {
+  color: var(--warn);
+  font-style: normal;
+}
+.headline__z {
+  margin-top: 9px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.headline__z.is-hot {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.estimators {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.estimators td {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  cursor: help;
+}
+.estimators td.num {
+  text-align: right;
+}
+.estimators tr:last-child td {
+  border-bottom: none;
+}
+
+.muted {
+  margin: 10px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+footer {
+  margin-top: 26px;
+  max-width: 760px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------- alerts --- */
+.alerts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.alerts li {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 2px 8px;
+  padding: 8px 0 8px 10px;
+  border-bottom: 1px solid var(--line);
+  border-left: 2px solid transparent;
+  animation: slide-in var(--slow) var(--ease);
+}
+.alerts li:last-child {
+  border-bottom: none;
+}
+.alerts li[data-to="stressed"] {
+  border-left-color: var(--warn);
+}
+.alerts li[data-to="normal"] {
+  border-left-color: var(--up);
+}
+.alerts__when {
+  color: var(--text-dim);
+}
+.alerts__what strong {
+  text-transform: capitalize;
+}
+.alerts__why {
+  grid-column: 2;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateY(-6px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------------------- toggle --- */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  transition: border-color var(--fast) var(--ease);
+}
+.toggle:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.toggle__track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: var(--r-pill);
+  background: var(--surface-alt);
+  border: 1px solid var(--line-strong);
+}
+.toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: transform var(--slow) var(--ease);
+}
+.toggle[aria-pressed="true"] .toggle__thumb {
+  transform: translateX(12px);
+}
+.toggle__label {
+  min-width: 34px;
+  text-align: left;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- zpane --- */
+.zpane__head,
+.strip__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.zpane h3,
+.strip h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+.zpane__legend,
+.strip__stat {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.zpane__plot {
+  position: relative;
+  width: 100%;
+}
+.zpane__plot canvas {
+  position: relative;
+  display: block;
+}
+.zpane__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The dead zone between the two Schmitt levels. A div rather than two canvas
+   strokes: it never changes between redraws, so it should not be repainted with
+   the series, and it gets a transition for free if a threshold is retuned. */
+.zband {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-radius: 2px;
+  transition:
+    top var(--slow) var(--ease),
+    height var(--slow) var(--ease);
+  pointer-events: none;
+}
+.zband__edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent);
+  transition: top var(--slow) var(--ease);
+  pointer-events: none;
+}
+.zband__edge--exit {
+  border-top-style: dotted;
+}
+
+/* ---------------------------------------------------------------- strip --- */
+.strip {
+  margin-top: 18px;
+}
+.strip__track {
+  display: flex;
+  height: 10px;
+  gap: 1px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--surface-alt);
+}
+.strip__seg {
+  min-width: 2px;
+}
+.strip__seg[data-regime="normal"] {
+  background: color-mix(in srgb, var(--up) 55%, transparent);
+}
+/* Hatched, not just amber: the strip is 10px tall, which is exactly where a
+   colour-only distinction fails first. */
+.strip__seg[data-regime="stressed"] {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--warn) 0 3px,
+    color-mix(in srgb, var(--warn) 55%, transparent) 3px 6px
+  );
+}
+.strip__seg[data-regime="unknown"] {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--line-strong) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+/* --------------------------------------------------------------- toasts --- */
+.toasts {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(380px, calc(100vw - 40px));
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
+  font-size: 13px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 12px 28px -12px rgb(0 0 0 / 0.5);
+  /* translate + opacity only. Animating height or top would put every toast
+     through layout on a thread that is also draining a 50/sec feed. */
+  animation: toast-in var(--slow) var(--ease) both;
+  will-change: transform, opacity;
+}
+.toast[data-to="stressed"] {
+  border-left-color: var(--warn);
+}
+.toast[data-to="normal"] {
+  border-left-color: var(--up);
+}
+.toast[data-leaving] {
+  animation: toast-out 200ms var(--ease) both;
+}
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+.toast__why {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.toast__close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.toast__close:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+@keyframes toast-in {
+  from {
+    transform: translate3d(0, 12px, 0) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes toast-out {
+  to {
+    transform: translate3d(24px, 0, 0);
+    opacity: 0;
+  }
+}
+
+/*
+ * WCAG 2.3.3 / prefers-reduced-motion. Vestibular disorders are not a niche —
+ * this is a dashboard someone stares at all day. Nothing above is load-bearing
+ * motion: every animation is decoration on a state that is also carried by text
+ * or a shape, so switching them off costs nothing but polish.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
