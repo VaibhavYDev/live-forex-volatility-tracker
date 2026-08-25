@@ -11,7 +11,9 @@ THE INVARIANT
 
 That is what makes ``maxmemory-policy volatile-lru`` safe on a single Redis:
 the cache is evictable, the write-ahead log and the leader lease are structurally
-immune because they carry no TTL. ``tests/unit/test_keys.py`` asserts it.
+immune because they carry no TTL. Asserted statically in
+``tests/unit/test_resilience.py`` and against a real Redis in
+``tests/integration/test_redis_pipeline.py``.
 
 Note that ``maxmemory-policy`` is a SERVER-level directive - logical databases
 (``SELECT 1``) do NOT get separate policies, a very common misconception. And

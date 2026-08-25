@@ -31,7 +31,10 @@ test-unit: ## Pure domain logic only (no services needed)
 test-chaos: ## Fault injection suite
 	uv run pytest tests/chaos -q -v --timeout=60
 
-test-cov: ## Coverage for packages/core
+test-ci: ## Exactly what CI runs: services required, not skipped
+	FX_REQUIRE_SERVICES=1 uv run pytest tests -q --timeout=90 --cov --cov-report=term-missing
+
+test-cov: ## Coverage across all four Python packages (gated at 60%)
 	uv run pytest tests -q --cov --cov-report=term-missing
 
 bench: ## Throughput and backpressure benchmarks (prints real numbers)
