@@ -5,7 +5,24 @@ global:
 scrape_configs:
   - job_name: api
     static_configs: [{targets: ["api:8000"]}]
+
+  # DNS service discovery, not a static target. The ingestor runs 2 replicas and
+  # Docker's embedded DNS returns an A record per container, so a static
+  # `ingestor:9100` target resolves to ONE of them at random on every scrape -
+  # leader and standby metrics interleaved under a single series, which is worse
+  # than useless when the thing you are watching is which replica holds the lease.
+  # An A-record lookup enumerates every replica and gives each its own target.
   - job_name: ingestor
-    static_configs: [{targets: ["ingestor:9100"]}]
+    dns_sd_configs:
+      - names: ["ingestor"]
+        type: A
+        port: 9100
+    relabel_configs:
+      # __address__ is the container IP, which changes on every recreate. Keep it
+      # as the instance label anyway - it is the only thing that distinguishes
+      # replicas - but make the job readable.
+      - source_labels: [__address__]
+        target_label: instance
+
   - job_name: worker
     static_configs: [{targets: ["worker:9101"]}]

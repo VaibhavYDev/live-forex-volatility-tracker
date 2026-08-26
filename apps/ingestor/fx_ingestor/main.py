@@ -39,6 +39,13 @@ log = structlog.get_logger(__name__)
 # for what this costs a provider when it is missing.
 MIN_HEALTHY_SESSION_S = 30.0
 
+# Feed status is re-stamped and re-published this often. It must divide
+# keys.TTL_STATUS_S comfortably - the TTL expiring is how every replica learns
+# the ingestor died without anyone sending a goodbye - and it must be well under
+# the 60s staleness thresholds in /readyz and the browser banner, so a single
+# missed write never reads as an outage.
+HEARTBEAT_S = 5.0
+
 
 def _provider_kwargs(cfg: IngestorSettings) -> dict[str, object]:
     if cfg.provider == "replay":
@@ -66,7 +73,14 @@ class Ingestor:
         self.breaker = CircuitBreaker(cfg.breaker_fail_threshold, cfg.breaker_reset_s)
         self._shutdown = asyncio.Event()
         self._force_reconnect = asyncio.Event()
-        self._last_status: dict[str, str] = {"state": "starting"}
+        started = datetime.now(UTC).isoformat()
+        self._last_status: dict[str, str] = {
+            "state": "starting",
+            "detail": "",
+            "provider": cfg.provider,
+            "ts": started,
+            "since": started,
+        }
         # Injected so the ladder can be tested without spending real minutes.
         self._monotonic: Callable[[], float] = time.monotonic
 
@@ -76,12 +90,29 @@ class Ingestor:
         A market dashboard that keeps rendering the last price with no indication
         the feed died is worse than one that shows nothing: it looks authoritative
         while being wrong. This is what drives the 'Data delayed' banner.
+
+        TWO TIMESTAMPS, BECAUSE THERE ARE TWO QUESTIONS
+        -----------------------------------------------
+        ``ts`` answers "when did the ingestor last confirm this?" - liveness. The
+        heartbeat refreshes it, so an unchanging ``ts`` means we have stopped
+        talking, not that nothing has happened.
+
+        ``since`` answers "when did the state last change?" - so the UI can say
+        "degraded for 12 minutes" rather than just "degraded".
+
+        Collapsing the two is what broke this before: ``ts`` was stamped only on a
+        state CHANGE and the heartbeat rewrote it verbatim, so a feed that
+        connected once and streamed happily for hours reported an age of hours.
+        Consumers read that as staleness, so the banner said "Stale" over live
+        prices and /readyz returned 503 on every healthy replica.
         """
+        now = datetime.now(UTC).isoformat()
         payload = {
             "state": state,
             "detail": detail,
             "provider": self.cfg.provider,
-            "ts": datetime.now(UTC).isoformat(),
+            "ts": now,
+            "since": now if state != self._last_status.get("state") else self._since(),
         }
         self._last_status = payload
         with contextlib.suppress(Exception):
@@ -185,23 +216,38 @@ class Ingestor:
                         attempt += 1
                     await asyncio.sleep(delay)
 
+    def _since(self) -> str:
+        return self._last_status.get("since", self._last_status.get("ts", ""))
+
     async def _heartbeat_loop(self) -> None:
-        """Refresh metrics and the feed-status TTL.
+        """Refresh metrics, and re-stamp the feed status.
 
         Only the leader heartbeats: a standby has no feed to report on, and two
         replicas writing conflicting status would make the UI flicker between
         healthy and degraded.
+
+        The re-stamp is the point. This loop IS the liveness signal, so writing
+        the previous payload back verbatim - original timestamp and all - meant
+        the age consumers computed was "time since the last state change", which
+        on a healthy feed grows forever. It is also PUBLISHED, not only stored:
+        a browser that connected an hour ago has no other way to learn that we
+        are still here, and its banner would go stale on a feed that never
+        missed a tick.
         """
         while not self._shutdown.is_set():
             with contextlib.suppress(Exception):
                 await self.pipeline.refresh_depth_metric()
                 if self.lease.is_leader:
-                    await self.redis.set(
-                        keys.FEED_STATUS,
-                        json.dumps(self._last_status),
-                        ex=keys.TTL_STATUS_S,
-                    )
-            await asyncio.sleep(5.0)
+                    self._last_status = {
+                        **self._last_status,
+                        "ts": datetime.now(UTC).isoformat(),
+                    }
+                    body = json.dumps(self._last_status)
+                    pipe = self.redis.pipeline(transaction=True)
+                    pipe.set(keys.FEED_STATUS, body, ex=keys.TTL_STATUS_S)
+                    pipe.publish(keys.channel_status(), body)
+                    await pipe.execute()
+            await asyncio.sleep(HEARTBEAT_S)
 
     async def run(self) -> None:
         serve_metrics(self.cfg.metrics_port)

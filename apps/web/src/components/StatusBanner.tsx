@@ -15,6 +15,7 @@
  * re-renders 40 pixels of header and nothing else.
  */
 
+import { humanDuration } from "../lib/regime";
 import { useConn, useFeed } from "../lib/stream/hooks";
 
 type Tone = "ok" | "warn" | "bad";
@@ -22,7 +23,12 @@ type Tone = "ok" | "warn" | "bad";
 export function StatusBanner() {
   const conn = useConn();
   const feed = useFeed();
+  // `ts` is a liveness heartbeat, not the age of the last state change - see
+  // FeedStatus. Reading the wrong one of those two is how this banner used to
+  // report "Stale" over prices that were visibly updating.
   const ageS = feed.ts ? (Date.now() - new Date(feed.ts).getTime()) / 1000 : null;
+  const heldS = feed.since ? (Date.now() - new Date(feed.since).getTime()) / 1000 : null;
+  const heldFor = heldS !== null && heldS >= 60 ? ` · for ${humanDuration(heldS)}` : "";
 
   let tone: Tone = "ok";
   let label = "Live";
@@ -41,11 +47,11 @@ export function StatusBanner() {
   } else if (feed.state === "degraded") {
     tone = "warn";
     label = "Data delayed";
-    detail = feed.detail ?? "upstream feed reconnecting";
+    detail = (feed.detail || "upstream feed reconnecting") + heldFor;
   } else if (feed.state === "fatal") {
     tone = "bad";
     label = "Feed stopped";
-    detail = feed.detail ?? "";
+    detail = (feed.detail || "no upstream connection") + heldFor;
   } else if (ageS !== null && ageS > 60) {
     tone = "warn";
     label = "Stale";

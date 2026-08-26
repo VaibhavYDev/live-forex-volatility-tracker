@@ -6,7 +6,7 @@ absorbs 50 messages/second without putting React on the 60 Hz path.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-388-brightgreen)
+![Tests](https://img.shields.io/badge/tests-394-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-81%25%20py%20%C2%B7%2092%25%20ts-brightgreen)
 ![mypy](https://img.shields.io/badge/mypy-strict-brightgreen)
 
@@ -54,6 +54,73 @@ so nothing above needs an API key or a market-data vendor. Set
 
 Append `?perf=1` to the dashboard for a frame-timing overlay: long tasks, dropped
 frames, observed fps, and the store's conflation counters.
+
+<details>
+<summary><strong>Troubleshooting <code>compose up</code></strong></summary>
+
+**Code changes do not show up.** Nothing is bind-mounted — every service runs
+from a built image, so `up -d` on an existing image restarts the *old* binary
+without saying so. After editing source or pulling:
+
+```bash
+docker compose up -d --build
+```
+
+This bites hardest on the ingestor, because a stale one still serves plausible
+data: the dashboard keeps drawing prices while the header goes `Stale`. Confirm
+which code is actually running by watching the feed heartbeat advance — `ts` is
+re-stamped every 5s, so two reads a few seconds apart must differ:
+
+```bash
+docker compose exec redis redis-cli GET feed:status; sleep 6
+docker compose exec redis redis-cli GET feed:status
+```
+
+A frozen `ts` on a container that is streaming means the image predates the
+heartbeat — rebuild. See `tests/unit/test_feed_heartbeat.py`.
+
+**`Bind for 0.0.0.0:8000 failed: port is already allocated`** — something else on
+the machine owns that port. Find it and stop it, or remap in
+`docker-compose.yml`:
+
+```bash
+# Linux/macOS
+lsof -i :8000 -i :5173
+# Windows PowerShell
+Get-NetTCPConnection -LocalPort 8000,5173 | Select-Object LocalPort, OwningProcess
+```
+
+Only `8000` (API) and `5173` (dashboard) are published on all interfaces. Redis,
+PostgreSQL and the worker's metrics port bind to `127.0.0.1` only, and the
+ingestor publishes nothing — it runs two replicas, and a fixed host port on a
+scaled service is a guaranteed collision. `tests/unit/test_compose.py` enforces
+that.
+
+**`docker compose up -d` exits non-zero and the dashboard never appears.** Compose
+aborts the whole run on the first container that fails to start, and `web` is
+last in the dependency graph — so a failure anywhere upstream shows up as
+"localhost:5173 does not load". Read the actual error rather than the symptom:
+
+```bash
+docker compose ps -a        # which container is not running
+docker compose logs --tail=50 <service>
+```
+
+**Ingestor metrics.** No host port by design; reach a replica directly with:
+
+```bash
+docker compose exec ingestor python -c \
+  "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:9100/metrics').read().decode()[:400])"
+```
+
+Or start the observability profile and use Prometheus, which discovers both
+replicas by DNS:
+
+```bash
+docker compose --profile observability up -d
+```
+
+</details>
 
 Local development, the four test tiers and the contribution conventions are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -392,14 +459,14 @@ NORMAL`) is enforced in the state machine and asserted in SQL.
 
 ## Testing
 
-388 tests across five tiers. Real Redis and real PostgreSQL for anything that
+394 tests across five tiers. Real Redis and real PostgreSQL for anything that
 depends on their semantics — mocking consumer-group pending lists, `XAUTOCLAIM`
 idle windows or `MINID` trimming would mean asserting our own assumptions back at
 ourselves.
 
 | Tier | Count | Needs | CI |
 |---|---|---|---|
-| Backend unit | 124 | nothing | every push |
+| Backend unit | 130 | nothing | every push |
 | Backend integration | 76 | Redis, PostgreSQL | every push |
 | Backend chaos | 19 | Redis, fault-injection server | every push |
 | Backend load | 4 | Redis | nightly |

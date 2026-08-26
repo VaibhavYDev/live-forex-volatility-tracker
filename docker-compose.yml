@@ -34,7 +34,7 @@ services:
     volumes:
       - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -55,7 +55,7 @@ services:
       # Files in this directory run once, in lexical order, on first boot.
       - ./infra/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
       - ./infra/migrations/003_alert_events.sql:/docker-entrypoint-initdb.d/003_alert_events.sql:ro
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fx} -d ${POSTGRES_DB:-fx}"]
       interval: 5s
@@ -66,18 +66,27 @@ services:
   ingestor:
     <<: *python
     command: ["python", "-m", "fx_ingestor.main"]
-    ports: ["9100:9100"]
+    environment:
+      FX_HEALTH_PORT: "9100"
     # Deliberately 2 replicas. Only ONE will hold the Redis lease and open an
     # upstream connection; the other sits in standby and promotes within the
     # lease TTL. `docker compose stop` one of them and watch the logs — that is
     # the single-writer story, demonstrable in ten seconds.
+    #
+    # NO host port. Two replicas cannot both bind 9100 on the host: the second
+    # container dies with "port is already allocated" and takes the whole
+    # `compose up` down with it, including the web UI. Prometheus reaches both
+    # over the compose network by DNS instead - see infra/grafana/prometheus.yml.
+    # For one replica's metrics directly:
+    #     docker compose exec ingestor python -c \
+    #       "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:9100/metrics').read().decode())"
     deploy:
       replicas: 2
 
   worker:
     <<: *python
     command: ["python", "-m", "fx_worker.main"]
-    ports: ["9101:9101"]
+    ports: ["127.0.0.1:9101:9101"]
     environment:
       FX_HEALTH_PORT: "9101"
 

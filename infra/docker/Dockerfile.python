@@ -64,7 +64,7 @@ USER fx
 # metrics server is listening".
 ENV FX_HEALTH_PORT=9100
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD python -c "import os,urllib.request;urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['FX_HEALTH_PORT']}/metrics\",timeout=2)" || exit 1
+    CMD python -c 'import os,urllib.request;urllib.request.urlopen("http://127.0.0.1:"+os.environ["FX_HEALTH_PORT"]+"/metrics",timeout=2)' || exit 1
 
 # Overridden per service in docker-compose.yml.
 CMD ["python", "-m", "fx_api.main"]

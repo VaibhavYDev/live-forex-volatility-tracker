@@ -64,7 +64,14 @@ export interface Bar {
 export interface FeedStatus {
   readonly state: FeedState;
   readonly detail?: string;
+  /** When the ingestor last CONFIRMED this — refreshed by its 5s heartbeat, so
+   *  a growing age means we have stopped hearing from it, not that nothing has
+   *  happened. Stamping this only on a state change is what once made a healthy
+   *  feed report "Stale · last update 1336s ago". */
   readonly ts?: string;
+  /** When the state last CHANGED. Lets the banner say "degraded for 12 minutes"
+   *  instead of just "degraded". */
+  readonly since?: string;
 }
 
 export interface Conn {
