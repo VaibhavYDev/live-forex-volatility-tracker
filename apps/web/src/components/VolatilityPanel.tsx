@@ -8,12 +8,13 @@
  * real measurement is how dashboards lie.
  */
 
+import { apiBase } from "../lib/endpoints";
 import { useEffect, useState } from "react";
 import { useAlerts, useQuote, useRegime, useVol } from "../lib/stream/hooks";
 import type { TransitionCause } from "../lib/stream/types";
 import { RegimeBadge } from "./RegimeBadge";
 
-const API = import.meta.env.VITE_API_URL ?? `http://${window.location.hostname}:8000`;
+const API = import.meta.env.VITE_API_URL ?? apiBase();
 
 /**
  * The cause is not decoration. "Back to normal" means three entirely different

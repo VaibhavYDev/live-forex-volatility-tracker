@@ -1,0 +1,43 @@
+# TLS terminator for the public demo.
+#
+# Caddy is here for one reason: it obtains and renews a Let's Encrypt
+# certificate without a cron job, a renewal hook, or a 90-day reminder in
+# someone's calendar. An expired certificate on a portfolio link is a browser
+# interstitial screaming "Not Secure" at the exact reviewer it was built for.
+#
+# HTTPS is not decoration. The dashboard's WebSocket inherits the page's scheme
+# (see apps/web/src/lib/endpoints.ts) — served over plain HTTP a browser is
+# increasingly willing to block the socket outright, and the page would render
+# with a permanently "Connecting" banner.
+
+{$FX_DOMAIN} {
+	encode zstd gzip
+
+	# Everything goes to the nginx image the local stack also runs: it serves the
+	# built SPA and already proxies /api and /ws to the API with the WebSocket
+	# upgrade dance. Terminating TLS here rather than teaching nginx about
+	# certificates keeps the demo running the SAME web artifact as `docker
+	# compose up` on a laptop.
+	#
+	# reverse_proxy passes Upgrade/Connection through natively and does not
+	# buffer, so streaming sockets need no extra directives.
+	reverse_proxy web:80
+
+	header {
+		# The dashboard is same-origin and loads no third-party script. Saying so
+		# costs nothing and stops the page being a useful injection target.
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stderr
+		format console
+		# Health checks and asset fetches at 25 ticks/sec of traffic would
+		# otherwise dominate the log volume on a box nobody is watching.
+		level WARN
+	}
+}

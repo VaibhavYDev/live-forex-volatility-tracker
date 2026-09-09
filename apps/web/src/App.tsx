@@ -9,10 +9,11 @@ import { SymbolTab } from "./components/SymbolTab";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ToastStack } from "./components/ToastStack";
 import { VolatilityPanel } from "./components/VolatilityPanel";
+import { wsUrl } from "./lib/endpoints";
 import { StreamProvider } from "./lib/stream/provider";
 import { ThemeProvider } from "./lib/theme";
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? `ws://${window.location.hostname}:8000/ws/stream`;
+const WS_URL = import.meta.env.VITE_WS_URL ?? wsUrl();
 const SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"];
 
 export default function App() {

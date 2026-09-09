@@ -25,6 +25,9 @@ The interesting problems here are not "draw a chart from a WebSocket". They are:
 Every claim below has a number or a test behind it. Where something is not
 measured, it says so.
 
+**▶ Live demo: https://DEMO-HOSTNAME-HERE** — the real stack, streaming now. No
+signup, no API key. Two ingestor replicas, one holding the lease.
+
 ---
 
 ## Run it
@@ -36,21 +39,23 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open <http://localhost:5173>.
+Then open `http://localhost:5173` — these are addresses on **your own machine**,
+live only while the stack above is running. The hosted demo is the link at the
+top of this page.
 
-That is the whole demo path. The default provider is `replay` — a deterministic
-synthetic feed whose per-minute realised volatility is exactly what it claims —
-so nothing above needs an API key or a market-data vendor. Set
-`FX_PROVIDER=tiingo` and `FX_PROVIDER_TOKEN=...` for a live feed.
+The default provider is `replay` — a deterministic synthetic feed whose
+per-minute realised volatility is exactly what it claims — so nothing above
+needs an API key or a market-data vendor. Set `FX_PROVIDER=tiingo` and
+`FX_PROVIDER_TOKEN=...` for a live feed.
 
-| Surface | URL |
+| Surface | Local address |
 |---|---|
-| Dashboard | <http://localhost:5173> |
-| REST + OpenAPI | <http://localhost:8000/docs> |
+| Dashboard | `http://localhost:5173` |
+| REST + OpenAPI | `http://localhost:8000/docs` |
 | Live stream | `ws://localhost:8000/ws/stream` |
-| Readiness | <http://localhost:8000/readyz> |
-| Prometheus | <http://localhost:9090> |
-| Grafana | <http://localhost:3000> |
+| Readiness | `http://localhost:8000/readyz` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
 
 Append `?perf=1` to the dashboard for a frame-timing overlay: long tasks, dropped
 frames, observed fps, and the store's conflation counters.
@@ -121,6 +126,14 @@ docker compose --profile observability up -d
 ```
 
 </details>
+
+### Hosting it yourself
+
+`docker-compose.prod.yml` is the public profile: Caddy terminating TLS in front
+of the same web image, no database, nothing published but 80 and 443. It runs on
+a free-tier ARM box — [docs/deploy-oracle.md](docs/deploy-oracle.md) is the
+runbook, including the two firewalls Oracle makes you open and the one you
+probably don't.
 
 Local development, the four test tiers and the contribution conventions are in
 [CONTRIBUTING.md](CONTRIBUTING.md).

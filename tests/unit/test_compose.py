@@ -136,3 +136,88 @@ def test_prometheus_scrapes_every_ingestor_replica(compose: dict[str, Any]) -> N
         "the ingestor is scaled, so it needs DNS service discovery rather than a static target"
     )
     assert "static_configs" not in jobs["ingestor"]
+
+
+# ---------------------------------------------------------------- prod profile
+
+PROD = Path(__file__).resolve().parents[2] / "docker-compose.prod.yml"
+
+
+@pytest.fixture(scope="module")
+def prod() -> dict[str, Any]:
+    doc: dict[str, Any] = yaml.safe_load(PROD.read_text())
+    return doc
+
+
+class TestPublicDemo:
+    """The prod file faces the internet unattended for months.
+
+    Every invariant here is one that fails silently rather than loudly: a demo
+    that is up but wrong looks identical to a demo that is fine, right up until
+    the reviewer it was built for opens it.
+    """
+
+    def test_only_the_tls_terminator_is_reachable(self, prod: dict[str, Any]) -> None:
+        # Publishing anything else re-opens the hole the whole design closes:
+        # the API on a raw port means a second firewall rule on two firewalls,
+        # and a plaintext path around the certificate.
+        exposed = {name: svc["ports"] for name, svc in prod["services"].items() if svc.get("ports")}
+        assert set(exposed) == {"caddy"}, f"unexpected public ports: {exposed}"
+
+    def test_the_terminator_serves_both_http_and_https(self, prod: dict[str, Any]) -> None:
+        # 80 is not optional: it is how the ACME HTTP-01 challenge completes and
+        # how a visitor typing the bare hostname gets redirected to TLS.
+        published = {p.split(":")[0] for p in prod["services"]["caddy"]["ports"]}
+        assert published == {"80", "443"}
+
+    def test_the_scaled_ingestor_still_claims_no_host_port(self, prod: dict[str, Any]) -> None:
+        # The original outage, restated for the profile that nobody watches.
+        ing = prod["services"]["ingestor"]
+        assert ing["deploy"]["replicas"] >= 2
+        assert not ing.get("ports")
+
+    def test_every_service_restarts_itself(self, prod: dict[str, Any]) -> None:
+        # The box reboots for kernel patches. Nothing on it is started by hand.
+        for name, svc in prod["services"].items():
+            assert svc.get("restart") == "unless-stopped", f"{name} would stay down"
+
+    def test_every_service_caps_its_logs(self, prod: dict[str, Any]) -> None:
+        # 25 ticks/sec for months on a fixed boot volume. Unbounded json-file
+        # logs fill the disk, and a full disk takes down every container at once
+        # for a reason that looks nothing like logging.
+        for name, svc in prod["services"].items():
+            opts = (svc.get("logging") or {}).get("options", {})
+            assert opts.get("max-size"), f"{name} has uncapped logs"
+            assert opts.get("max-file"), f"{name} never rotates logs"
+
+    def test_certificates_survive_a_restart(self, prod: dict[str, Any]) -> None:
+        # Without a persistent /data, Caddy re-issues on every restart and burns
+        # through the Let's Encrypt rate limit, after which the demo serves an
+        # untrusted certificate for a week.
+        mounts = prod["services"]["caddy"]["volumes"]
+        assert any(str(m).endswith(":/data") for m in mounts), "no persistent cert store"
+
+    def test_the_database_is_absent_on_purpose(self, prod: dict[str, Any]) -> None:
+        # Guards the claim the file makes: the dashboard reads Redis only. If
+        # someone later couples the API to Postgres, this profile breaks in
+        # production and this test is the cheapest place to find out.
+        assert "timescale" not in prod["services"]
+        assert "worker" not in prod["services"]
+
+    def test_the_api_really_does_not_open_a_database(self) -> None:
+        """The assumption the whole profile rests on, checked at the source.
+
+        Dropping Timescale is only safe while the API serves the dashboard from
+        Redis alone. The moment someone adds a query, the demo starts returning
+        500s on a box nobody is watching — so assert the absence of a driver
+        rather than trusting a comment.
+        """
+        api = Path(__file__).resolve().parents[2] / "apps" / "api" / "fx_api"
+        drivers = ("asyncpg", "psycopg", "sqlalchemy", "databases")
+        offenders = [
+            f"{path.relative_to(api)}:{n}"
+            for path in api.rglob("*.py")
+            for n, line in enumerate(path.read_text().splitlines(), 1)
+            if line.startswith(("import ", "from ")) and any(d in line for d in drivers)
+        ]
+        assert not offenders, f"API imports a database driver: {offenders}"

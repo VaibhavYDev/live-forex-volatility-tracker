@@ -1,0 +1,128 @@
+# =============================================================================
+# The public demo. Used ALONE, not layered over docker-compose.yml:
+#
+#     docker compose -f docker-compose.prod.yml up -d --build
+#
+# Standalone on purpose. Compose merges `depends_on` key-by-key, so an overlay
+# cannot REMOVE the base file's dependency on Timescale — it would inherit a
+# health gate on a service this profile deliberately does not run.
+#
+# WHAT IS MISSING, AND WHY
+# ------------------------
+# No `timescale`, no `worker`. The API opens no database connection — every
+# figure the dashboard renders is served from Redis, which the ingestor writes.
+# Postgres is the DURABILITY path (the worker drains the WAL into hypertables),
+# not the dashboard path, so a demo box gains nothing from it and pays for it
+# twice: ~1GB of resident memory, and an image whose arm64 availability is not
+# guaranteed on Oracle's Ampere hardware.
+#
+# The full five-service stack is what `docker compose up` runs locally. This
+# file is the subset that has to survive unattended for months, and every
+# service omitted is a service that cannot die at 3am while a reviewer looks.
+# =============================================================================
+
+name: fx-demo
+
+x-python: &python
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.python
+  environment: &pyenv
+    REDIS_URL: redis://redis:6379/0
+    FX_PROVIDER: replay
+    FX_SYMBOLS: "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF"
+    FX_REPLAY_TICKS_PER_SEC: "25"
+    FX_REPLAY_SEED: "42"
+    FX_REPLAY_BURST_EVERY_S: "90"
+    LOG_LEVEL: INFO
+  depends_on:
+    redis: {condition: service_healthy}
+  restart: unless-stopped
+  # An unattended box has a finite disk. The default json-file driver grows
+  # without bound, and a 25 tick/sec feed running for months is exactly the
+  # workload that fills a boot volume and takes the demo down by filling `/`.
+  logging: &logs
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # The ONLY ports open to the internet. Everything else talks over the
+    # compose network, so the API is not directly reachable and needs no hole
+    # in either firewall.
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      FX_DOMAIN: ${FX_DOMAIN:?set FX_DOMAIN in .env - Caddy needs a hostname to get a certificate for}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here. Losing this volume means re-issuing on every
+      # restart, which burns Let's Encrypt rate limits fast.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web]
+    logging: *logs
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+    restart: unless-stopped
+    # No host port. Caddy reaches it over the compose network; publishing it
+    # would expose plain HTTP alongside the TLS endpoint.
+    depends_on: [api]
+    logging: *logs
+
+  api:
+    <<: *python
+    command:
+      ["uvicorn", "fx_api.main:app", "--host", "0.0.0.0", "--port", "8000",
+       "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
+    environment:
+      <<: *pyenv
+      # The demo has no login, so a browser cannot fetch a ticket. Auth defaults
+      # to ON in code; this is the explicit, documented opt-out. Abuse is bounded
+      # by the API's own rate limiter, and the data is synthetic.
+      FX_REQUIRE_WS_TICKET: "0"
+      FX_HEALTH_PORT: "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+
+  ingestor:
+    <<: *python
+    command: ["python", "-m", "fx_ingestor.main"]
+    environment:
+      <<: *pyenv
+      FX_HEALTH_PORT: "9100"
+    # Two replicas here for the same reason as local: exactly one holds the
+    # Redis lease and connects upstream. On a public demo it earns its keep —
+    # `docker compose restart` on the leader shows the standby promote within
+    # the lease TTL, live, on a URL a reviewer is already looking at.
+    deploy:
+      replicas: 2
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    restart: unless-stopped
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    # Not published. Nothing outside this network has any business reaching it.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logs
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:
