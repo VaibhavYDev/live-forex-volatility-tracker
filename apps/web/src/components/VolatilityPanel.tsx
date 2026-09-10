@@ -8,6 +8,7 @@
  * real measurement is how dashboards lie.
  */
 
+import { demoCompare, isDemo } from "../demo";
 import { apiBase } from "../lib/endpoints";
 import { useEffect, useState } from "react";
 import { useAlerts, useQuote, useRegime, useVol } from "../lib/stream/hooks";
@@ -59,6 +60,12 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (isDemo()) {
+      // Computed by the real estimators at build time; nothing to request.
+      setCompare(demoCompare(symbol));
+      setError(null);
+      return;
+    }
     let cancelled = false;
     const load = async () => {
       try {

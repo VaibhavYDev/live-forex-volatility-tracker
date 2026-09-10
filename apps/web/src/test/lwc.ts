@@ -1,5 +1,14 @@
 import { vi } from "vitest";
 
+/** Recording time scale. `applyOptions` is what the chart uses to pin bar width
+ *  while a session is still short; without it here the component throws. */
+export const timeScale = {
+  fitContent: vi.fn(),
+  applyOptions: vi.fn(),
+  setVisibleRange: vi.fn(),
+  scrollToRealTime: vi.fn(),
+};
+
 /**
  * A stand-in for Lightweight Charts.
  *
@@ -45,8 +54,20 @@ export function createChart(): unknown {
       spy.histograms.push(h);
       return h;
     },
+    // The regime shading moved from a histogram to a stepped area: a histogram
+    // leaves a gap between bars, which at 300 candles reads as a barcode over
+    // the chart. Collected in the same list so existing assertions about "the
+    // shading series" keep working regardless of which primitive draws it.
+    addAreaSeries: () => {
+      const a = series();
+      spy.histograms.push(a);
+      return a;
+    },
     applyOptions: vi.fn(),
-    timeScale: () => ({ fitContent: vi.fn() }),
+    // One shared object, not a fresh one per call: the component calls
+    // timeScale() again on each render, and a new mock each time would discard
+    // the very calls a test is trying to assert on.
+    timeScale: () => timeScale,
     remove: () => {
       spy.removed = true;
     },

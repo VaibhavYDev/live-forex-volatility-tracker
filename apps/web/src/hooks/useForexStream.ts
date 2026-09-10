@@ -15,13 +15,44 @@
  * server-side conflation in `fx_api/ws/conflator.py`.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ForexStreamClient, type ServerFrame } from "../lib/stream/client";
 import type { MarketStore } from "../lib/stream/store";
 import type { Bar } from "../lib/stream/types";
 
+/** The banner calls the feed stale past 60s, so recovery has to start before a
+ *  visitor has finished reading the word. */
+const STALE_AFTER_S = 75;
+const STALE_CHECK_MS = 15_000;
+
 export function useForexStream(store: MarketStore, url: string, symbols: string[]): void {
   const key = symbols.join(",");
+  // Bumping this tears the socket down and builds a new one. That is the whole
+  // reconnect mechanism: the effect below already owns the full lifecycle, so
+  // re-running it is a cleaner recovery than reaching into a live client.
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    // A socket can stay OPEN while the feed behind it has stopped — the machine
+    // slept, the ingestor died, the container was stopped. Nothing in the
+    // WebSocket layer notices, so the page sits on "Stale" forever with a
+    // perfectly healthy connection. Watch the heartbeat and rebuild when it
+    // stops, which is the only signal that actually tracks the feed.
+    const watchdog = window.setInterval(() => {
+      const ts = store.feed().ts;
+      if (!ts) return;
+      const age = (Date.now() - Date.parse(ts)) / 1000;
+      if (age > STALE_AFTER_S) setAttempt((n) => n + 1);
+    }, STALE_CHECK_MS);
+    return () => window.clearInterval(watchdog);
+  }, [store]);
+
+  // Exposed so the banner's refresh control can force the same path a user
+  // would otherwise get by reloading the page.
+  useEffect(() => {
+    const off = store.onRefreshRequest(() => setAttempt((n) => n + 1));
+    return off;
+  }, [store]);
 
   useEffect(() => {
     // StrictMode mounts twice in dev, and a socket that is closing can still
@@ -124,5 +155,5 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
     // Keyed on the joined string, not the array: `symbols` is a fresh reference
     // on every render at most call sites, and depending on it would tear down
     // and rebuild the socket on each one.
-  }, [store, url, key]);
+  }, [store, url, key, attempt]);
 }

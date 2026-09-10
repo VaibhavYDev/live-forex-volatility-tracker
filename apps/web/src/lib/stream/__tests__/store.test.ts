@@ -371,3 +371,58 @@ describe("regime seeding", () => {
     expect(store.regime("EURUSD")).toBe("unknown");
   });
 });
+
+describe("seeded history", () => {
+  /**
+   * The published demo loads with transitions that already happened. They
+   * belong in the alert LIST — a reviewer should see that the detector fired —
+   * but pushing them at the toast stack greeted every visitor with a wall of
+   * pop-ups announcing events from before their tab existed.
+   */
+
+  it("records a seeded transition in the list", () => {
+    store.seedAlert(alert("EURUSD", 1));
+    expect(store.alerts("EURUSD")).toHaveLength(1);
+  });
+
+  it("does not toast it", () => {
+    const spy = vi.fn();
+    store.onAlert(spy);
+
+    store.seedAlert(alert("EURUSD", 1));
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("still moves the regime, so the badge is right on arrival", () => {
+    // The list and the badge have to agree: showing a stress transition beside
+    // a NORMAL badge reads as a bug in the detector.
+    store.seedAlert(alert("EURUSD", 1));
+    expect(store.regime("EURUSD")).toBe("stressed");
+  });
+
+  it("a live transition after a seeded one still toasts", () => {
+    // Seeding must not put the store into a permanently quiet mode.
+    const spy = vi.fn();
+    store.onAlert(spy);
+
+    store.seedAlert(alert("EURUSD", 1));
+    store.pushAlert(alert("EURUSD", 2, "normal"));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a redelivered transition does not toast twice", () => {
+    // The stream is at-least-once. Refactoring the duplicate guard out of
+    // pushAlert once broke exactly this, and the existing callback test caught
+    // it — pinned here too, next to the seeding it shares a code path with.
+    const spy = vi.fn();
+    store.onAlert(spy);
+
+    store.pushAlert(alert("EURUSD", 7));
+    store.pushAlert(alert("EURUSD", 7));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(store.alerts("EURUSD")).toHaveLength(1);
+  });
+});

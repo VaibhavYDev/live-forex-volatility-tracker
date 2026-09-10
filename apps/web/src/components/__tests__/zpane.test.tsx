@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { StoreCtx } from "../../lib/stream/hooks";
 import { MarketStore } from "../../lib/stream/store";
-import type { Vol, ZPoint } from "../../lib/stream/types";
+import type { Bar, Vol, ZPoint } from "../../lib/stream/types";
 import { ThemeProvider } from "../../lib/theme";
 import { stubCanvas, stubWidth, type Recorder } from "../../test/canvas";
 import { ZScorePane } from "../charts/ZScorePane";
@@ -47,10 +47,14 @@ const mount = (ui: ReactNode) =>
   );
 
 const band = () => document.querySelector<HTMLElement>(".zband");
-const seed = (points: ZPoint[], v?: Vol) =>
+/** A sealed OHLC bar. The pane only reads `t`, but the store wants the shape. */
+const bar = (t: number): Bar => ({ t, o: 1.1, h: 1.1, l: 1.1, c: 1.1, n: 1, src: "replay" });
+
+const seed = (points: ZPoint[], v?: Vol, bars?: Bar[]) =>
   act(() => {
     store.setZHist("EURUSD", points);
     if (v) store.setVol(v);
+    if (bars) store.setBars({ EURUSD: bars });
   });
 
 describe("the hysteresis band", () => {
@@ -138,7 +142,27 @@ describe("the series", () => {
 
   it("renders an axis and says so when there is nothing to plot", () => {
     mount(<ZScorePane symbol="EURUSD" />);
-    expect(screen.getByText(/waiting for the first sealed bar/i)).toBeInTheDocument();
+    expect(screen.getByText(/no sealed bars yet/i)).toBeInTheDocument();
+  });
+
+  it("does not claim to be waiting for a bar while bars are on screen", () => {
+    // The old copy said "Waiting for the first sealed bar" regardless, which is
+    // visibly false with candles rendered directly above it. A z-score is
+    // missing here because the BASELINE is not estimated yet, not because no
+    // bar has sealed, and the panel has to say the true thing.
+    seed([], vol(3, 1.5), [bar(0), bar(60), bar(120)]);
+    mount(<ZScorePane symbol="EURUSD" />);
+
+    expect(screen.queryByText(/waiting for the first sealed bar/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/estimating the baseline/i)).toBeInTheDocument();
+  });
+
+  it("counts down the bars left in the warm-up", () => {
+    // 33 bars to a baseline; 3 seen means 30 to go. A progressing number is the
+    // difference between "warming up" and "stuck".
+    seed([], vol(3, 1.5), [bar(0), bar(60), bar(120)]);
+    mount(<ZScorePane symbol="EURUSD" />);
+    expect(screen.getByText(/30 more bars/i)).toBeInTheDocument();
   });
 });
 

@@ -25,9 +25,6 @@ The interesting problems here are not "draw a chart from a WebSocket". They are:
 Every claim below has a number or a test behind it. Where something is not
 measured, it says so.
 
-**▶ Live demo: https://DEMO-HOSTNAME-HERE** — the real stack, streaming now. No
-signup, no API key. Two ingestor replicas, one holding the lease.
-
 ---
 
 ## Run it
@@ -39,23 +36,31 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Then open `http://localhost:5173` — these are addresses on **your own machine**,
-live only while the stack above is running. The hosted demo is the link at the
-top of this page.
+Then open <http://localhost:5173>.
 
-The default provider is `replay` — a deterministic synthetic feed whose
-per-minute realised volatility is exactly what it claims — so nothing above
-needs an API key or a market-data vendor. Set `FX_PROVIDER=tiingo` and
-`FX_PROVIDER_TOKEN=...` for a live feed.
+Not set up to run it? The same dashboard is served at
+**<https://vaibhavydev.github.io/live-forex-volatility-tracker/>** — no install,
+nothing to start. It is a static build carrying a session that
+`scripts/build_demo_dataset.py` produced by running the real `fx_core` engine,
+so every σ, z-score and regime transition on it came out of the code in this
+repository rather than out of JavaScript imitating it.
 
-| Surface | Local address |
+That is the whole demo path, and it needs no API key: the default provider is
+`replay`, a deterministic synthetic feed whose per-minute realised volatility is
+exactly what it claims. Set `FX_PROVIDER=tiingo` and `FX_PROVIDER_TOKEN=...` for
+a live feed.
+
+Every address below is on **your own machine** and answers only while the stack
+above is running.
+
+| Surface | Address (after `compose up`) |
 |---|---|
-| Dashboard | `http://localhost:5173` |
-| REST + OpenAPI | `http://localhost:8000/docs` |
+| Dashboard | <http://localhost:5173> · [hosted copy](https://vaibhavydev.github.io/live-forex-volatility-tracker/) |
+| REST + OpenAPI | <http://localhost:8000/docs> |
 | Live stream | `ws://localhost:8000/ws/stream` |
-| Readiness | `http://localhost:8000/readyz` |
-| Prometheus | `http://localhost:9090` |
-| Grafana | `http://localhost:3000` |
+| Readiness | <http://localhost:8000/readyz> |
+| Prometheus | <http://localhost:9090> |
+| Grafana | <http://localhost:3000> |
 
 Append `?perf=1` to the dashboard for a frame-timing overlay: long tasks, dropped
 frames, observed fps, and the store's conflation counters.

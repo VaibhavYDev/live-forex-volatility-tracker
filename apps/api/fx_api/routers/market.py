@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fx_core import keys
 from fx_core.calendar import active_sessions, is_market_open, next_close, next_open
+from fx_core.intervals import INTERVALS, ORDER, base_count, fold
 from fx_core.models import Bar, BarSource, Estimator, VolSnapshot
 from fx_core.volatility import (
     close_to_close,
@@ -149,30 +150,56 @@ async def market_status() -> dict[str, Any]:
     }
 
 
+def _interval(raw: str) -> str:
+    """Validate a timeframe from the query string.
+
+    Rejected loudly rather than defaulting to 1m: silently serving a different
+    timeframe than the one the button says is selected is worse than an error,
+    because the chart looks fine and every candle on it is the wrong duration.
+    """
+    if raw not in INTERVALS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"interval must be one of {', '.join(ORDER)}",
+        )
+    return raw
+
+
+async def _base_bars(symbol: str, base: str, count: int) -> list[dict[str, Any]]:
+    """Raw stored bars, oldest first. ZREVRANGE hands back newest-first."""
+    redis = get_redis()
+    rows = await redis.zrevrange(keys.history(symbol, base), 0, count - 1)
+    return [json.loads(str(r)) for r in reversed(rows or [])]
+
+
 @router.get("/bars/{symbol}")
-async def bars(symbol: str, limit: int = Query(default=240, ge=1, le=1440)) -> dict[str, Any]:
-    """Recent bars from the Redis hot cache.
+async def bars(
+    symbol: str,
+    interval: str = Query(default="1m"),
+    limit: int = Query(default=240, ge=1, le=1440),
+) -> dict[str, Any]:
+    """Recent bars at any timeframe, from the Redis hot cache.
 
     Redis-first on purpose: page load is the burstiest read there is, and it is
     served from a cache the ingestor already maintains, so a wave of reloads
     cannot become a wave of database queries.
+
+    Aggregated here rather than in the browser so the wire carries `limit` bars
+    instead of the tens of thousands of one-minute bars they were folded from.
+    A 1-week chart would otherwise ship four years of minutes to draw 200
+    candles.
     """
     sym = _symbol(symbol)
-    rows = await _bars_from_cache(sym, limit)
+    tf = _interval(interval)
+    spec = INTERVALS[tf]
+
+    base = await _base_bars(sym, spec.base, base_count(tf, limit))
+    rows = fold(base, tf)[-limit:]
+
     return {
         "symbol": sym,
-        "bars": [
-            {
-                "t": int(b.bucket.timestamp()),
-                "o": b.open,
-                "h": b.high,
-                "l": b.low,
-                "c": b.close,
-                "n": b.tick_count,
-                "src": str(b.source),
-            }
-            for b in rows
-        ],
+        "interval": tf,
+        "bars": rows,
         "source": "cache",
         "warming_up": not rows,
     }

@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { axe } from "jest-axe";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreCtx } from "../../lib/stream/hooks";
 import { MarketStore } from "../../lib/stream/store";
 import type { FeedState } from "../../lib/stream/types";
@@ -145,4 +146,53 @@ it("announces politely rather than interrupting", async () => {
 
   expect(screen.getByRole("status")).toHaveAttribute("aria-live", "polite");
   expect(await axe(container)).toHaveNoViolations();
+});
+
+describe("recovering from a stopped feed", () => {
+  /**
+   * The failure this addresses: a machine sleeps overnight, the ingestor stops,
+   * the WebSocket stays OPEN because nothing in that layer noticed, and the
+   * page sits on "Stale · last update 66237s ago" until somebody reloads it.
+   */
+
+  it("offers a refresh control once something is wrong", () => {
+    feed("healthy", { ts: ago(600) }); // stale
+    mount();
+    expect(screen.getByRole("button", { name: /refresh/i })).toBeInTheDocument();
+  });
+
+  it("does not offer one while the feed is fine", () => {
+    // A reconnect button on a healthy feed only interrupts it.
+    feed("healthy", { ts: ago(2) });
+    mount();
+    expect(screen.queryByRole("button", { name: /refresh/i })).not.toBeInTheDocument();
+  });
+
+  it("asks the connection owner to reconnect", async () => {
+    const asked = vi.fn();
+    store.onRefreshRequest(asked);
+    feed("healthy", { ts: ago(600) });
+    mount();
+
+    await userEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    expect(asked).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps counting while the feed is dead", () => {
+    // The age was computed once per store update, and a stopped feed produces
+    // no more updates — so the one number that matters stopped moving at the
+    // exact moment it started mattering.
+    vi.useFakeTimers();
+    try {
+      feed("healthy", { ts: ago(120) });
+      mount();
+      const before = screen.getByRole("status").textContent ?? "";
+
+      act(() => void vi.advanceTimersByTime(5_000));
+
+      expect(screen.getByRole("status").textContent).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

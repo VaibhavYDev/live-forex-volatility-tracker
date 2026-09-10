@@ -9,6 +9,8 @@ import { SymbolTab } from "./components/SymbolTab";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ToastStack } from "./components/ToastStack";
 import { VolatilityPanel } from "./components/VolatilityPanel";
+import { DemoProvider } from "./demo/DemoProvider";
+import { isDemo } from "./demo";
 import { wsUrl } from "./lib/endpoints";
 import { StreamProvider } from "./lib/stream/provider";
 import { ThemeProvider } from "./lib/theme";
@@ -19,9 +21,17 @@ const SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"];
 export default function App() {
   return (
     <ThemeProvider>
-      <StreamProvider url={WS_URL} symbols={SYMBOLS}>
-        <Terminal />
-      </StreamProvider>
+      {/* The only fork in the app. Everything below is identical either way —
+          the demo swaps the SOURCE, not the dashboard. */}
+      {isDemo() ? (
+        <DemoProvider>
+          <Terminal />
+        </DemoProvider>
+      ) : (
+        <StreamProvider url={WS_URL} symbols={SYMBOLS}>
+          <Terminal />
+        </StreamProvider>
+      )}
     </ThemeProvider>
   );
 }

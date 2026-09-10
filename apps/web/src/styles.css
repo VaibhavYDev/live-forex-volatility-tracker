@@ -796,3 +796,98 @@ footer {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------------------------------------------------------- timeframe bar */
+/* Sits above the chart, aligned with its left edge so the selected timeframe
+   reads as a property of the chart rather than of the page. */
+.chart__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.tfbar {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2, transparent);
+}
+
+.tfbar__btn {
+  min-width: 2.4rem;
+  /* 28px tall is below the 44px WCAG 2.5.8 ideal, but these sit in a toolbar
+     of nine and full-size targets would dominate the header. The row is
+     reachable by keyboard with one tab stop and arrow keys, which is the
+     accommodation that matters most here. */
+  padding: 0.3rem 0.45rem;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  /* Colour alone must not carry the selected state - see the weight and the
+     underline below, which survive greyscale and most colour-vision deficits. */
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.tfbar__btn:hover {
+  color: var(--text);
+  background: var(--line);
+}
+
+.tfbar__btn--on {
+  color: var(--text);
+  background: var(--line);
+  font-weight: 650;
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.tfbar__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chart__note {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.chart__note--bad {
+  color: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tfbar__btn {
+    transition: none;
+  }
+}
+
+/* Reconnect control. Lives inside the banner so it appears exactly where the
+   problem is reported, rather than making the reader hunt for it. */
+.status__retry {
+  margin-left: 0.55rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.status__retry:hover {
+  opacity: 1;
+}
+
+.status__retry:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useLiveSummary } from "../../lib/a11y";
-import { useVol, useZHist } from "../../lib/stream/hooks";
+import { useBars, useVol, useZHist } from "../../lib/stream/hooks";
 import type { ZPoint } from "../../lib/stream/types";
 import { useTheme } from "../../lib/theme";
 
@@ -50,6 +50,7 @@ const pct = (v: number, s: Scale) => ((s.hi - v) / (s.hi - s.lo)) * 100;
 
 export function ZScorePane({ symbol }: { symbol: string }) {
   const points = useZHist(symbol);
+  const bars = useBars(symbol);
   const vol = useVol(symbol);
   const { palette } = useTheme();
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -167,7 +168,7 @@ export function ZScorePane({ symbol }: { symbol: string }) {
           </>
         )}
         <canvas ref={canvas} role="img" aria-label={describe(symbol, points, enter, exit)} />
-        {points.length === 0 && <p className="zpane__empty">Waiting for the first sealed bar.</p>}
+        {points.length === 0 && <p className="zpane__empty">{warmupNote(bars)}</p>}
       </div>
 
       <p className="sr-only" aria-live="polite">
@@ -175,6 +176,28 @@ export function ZScorePane({ symbol }: { symbol: string }) {
       </p>
     </section>
   );
+}
+
+/** WARM_UP_BARS mirrors the detector: `session_warmup` is 30 minutes and
+ *  `rearm_bars` is 3, so no z-score exists until roughly the 33rd sealed bar.
+ *  See packages/core/fx_core/alerts/detector.py. */
+const WARM_UP_BARS = 33;
+
+/**
+ * The empty state used to read "Waiting for the first sealed bar", which is
+ * false the moment a single candle is on screen directly above it - and it is
+ * on screen within a minute. Saying something demonstrably untrue about the
+ * system's own state is worse than saying nothing, because the reader stops
+ * trusting the rest of the panel.
+ *
+ * The z-score is genuinely absent, but for a reason worth stating: a z-score is
+ * a distance from a baseline, and the baseline has not been estimated yet.
+ */
+function warmupNote(bars: readonly { t: number }[]): string {
+  if (bars.length === 0) return "No sealed bars yet.";
+  const left = WARM_UP_BARS - bars.length;
+  if (left <= 0) return "Baseline ready — waiting for the next sealed bar.";
+  return `Estimating the baseline — ${left} more ${left === 1 ? "bar" : "bars"}.`;
 }
 
 function describe(

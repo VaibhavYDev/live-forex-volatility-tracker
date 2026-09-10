@@ -61,10 +61,13 @@ import structlog
 from fx_core import keys
 from fx_core.alerts import DetectorConfig, Regime, RegimeDetector, RegimeTransition, TriggerConfig
 from fx_core.alerts.detector import DetectorSnapshot
+from fx_core.backfill import synth_bars
 from fx_core.models import Bar, Estimator, Tick, VolSnapshot
 from fx_core.volatility import BucketAccumulator, EwmaVariance, RollingWindow
 from fx_core.volatility.buckets import floor_to_bucket
 from prometheus_client import Counter, Gauge, Histogram
+
+from fx_ingestor.providers.replay import SYMBOL_DEFAULTS
 
 log = structlog.get_logger(__name__)
 
@@ -91,6 +94,18 @@ REGIME_RESTORED = Counter("fx_regime_restored_total", "Detector states rehydrate
 # outage, so its return is a gap, not a minute of trading. Excluded from every
 # estimator - this is the same shape of artefact as the Sunday reopen.
 GAP_BAR_MULTIPLE = 3
+
+
+# How much past to synthesise, and at what resolution. 30 days of minutes
+# covers every intraday timeframe (4h needs 180 candles = 30 days); 10 years of
+# days covers 1w and 1M, where 200 weekly candles alone is four years.
+_BACKFILL_PLAN: tuple[tuple[str, int, int], ...] = (
+    ("1m", 60, 43_200),  # 30 days
+    ("1d", 86_400, 3_650),  # 10 years
+)
+
+#: (price, annual_vol, pip) for a symbol the replay provider has no spec for.
+_BACKFILL_FALLBACK = (1.0000, 0.080, 0.0001)
 
 
 class SymbolState:
@@ -127,10 +142,14 @@ class IngestPipeline:
         retention_s: int = 900,
         detector_config: DetectorConfig | None = None,
         trigger_config: TriggerConfig | None = None,
+        backfill_seed: int = 42,
     ) -> None:
         self._redis = redis
         self._bucket_seconds = bucket_seconds
         self._retention_ms = retention_s * 1000
+        # Shared with the replay provider so the synthesised past and the live
+        # feed are two stretches of one process, not two unrelated walks.
+        self._backfill_seed = backfill_seed
         self._detector_config = detector_config or DetectorConfig()
         self._trigger_config = trigger_config or TriggerConfig()
         self._feed_is_stale = False
@@ -439,6 +458,61 @@ class IngestPipeline:
         ).inc()
 
     # ----------------------------------------------------------- rehydration
+    async def backfill_history(self) -> int:
+        """Give a cold deployment a past, once.
+
+        A container that started sixty seconds ago has sixty seconds of chart,
+        nothing at all above the 1h timeframe, and a blank z-score pane for the
+        first half hour while the detector's baseline warms. That is what a
+        reviewer opening the demo link actually sees, and it reads as a broken
+        product rather than a new one.
+
+        Two series, because one cannot serve both ends: 1-minute bars for 30
+        days feed 1m through 4h, and daily bars for 10 years feed 1d/1w/1M. A
+        week of 1-minute bars would be 10_080 candles at 0.09px each.
+
+        IDEMPOTENT BY CONSTRUCTION. Writes only into an EMPTY key, so a restart
+        never overwrites bars the feed actually observed, and two replicas
+        racing on lease acquisition cannot interleave two different pasts - the
+        generator is deterministic, so they would write identical bytes anyway.
+        """
+        if not self.symbols:
+            return 0
+
+        now = int(datetime.now(UTC).timestamp())
+        written = 0
+
+        for symbol in self.symbols:
+            spec = SYMBOL_DEFAULTS.get(symbol)
+            price, vol, pip = (spec.price, spec.daily_vol, spec.pip) if spec else _BACKFILL_FALLBACK
+            for interval, seconds, count in _BACKFILL_PLAN:
+                key = keys.history(symbol, interval)
+                if await self._redis.exists(key):
+                    continue
+
+                bars = synth_bars(
+                    end_epoch=now,
+                    count=count,
+                    seconds=seconds,
+                    price=price,
+                    annual_vol=vol,
+                    pip=pip,
+                    seed=self._backfill_seed,
+                )
+                pipe = self._redis.pipeline(transaction=False)
+                # Chunked: one ZADD of 43_200 members is a single huge command
+                # that blocks the event loop on serialisation and can exceed the
+                # proto-max-bulk-len on a default Redis config.
+                for start in range(0, len(bars), 1_000):
+                    chunk = bars[start : start + 1_000]
+                    pipe.zadd(key, {json.dumps(b): b["t"] for b in chunk})
+                pipe.expire(key, keys.TTL_HISTORY_S)
+                await pipe.execute()
+                written += len(bars)
+                log.info("backfill.written", symbol=symbol, interval=interval, bars=len(bars))
+
+        return written
+
     async def restore_detectors(self) -> int:
         """Rehydrate every symbol's detector from Redis. Called on lease acquisition.
 

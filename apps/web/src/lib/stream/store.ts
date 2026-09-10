@@ -77,6 +77,7 @@ export class MarketStore {
   #subs = new Map<Topic, Set<() => void>>();
   #tickers = new Map<string, Set<TickFn>>();
   #alertFns = new Set<AlertFn>();
+  #refreshFns = new Set<() => void>();
 
   #buf = new Map<string, Quote>();
   #frame: number | null = null;
@@ -235,13 +236,34 @@ export class MarketStore {
    * can hand back a stable reference without filtering.
    */
   pushAlert(t: Transition): void {
+    // Only notify when this is genuinely new. The stream is at-least-once, so a
+    // redelivered transition would otherwise toast twice for one event.
+    if (this.#recordAlert(t)) {
+      for (const fn of this.#alertFns) fn(t);
+    }
+  }
+
+  /**
+   * History, not news.
+   *
+   * A transition that happened before this tab existed belongs in the alert
+   * LIST, but firing it at the toast stack would greet every visitor with a
+   * wall of pop-ups announcing events they were not present for. `pushAlert`
+   * stays the path for anything arriving live.
+   */
+  seedAlert(t: Transition): void {
+    this.#recordAlert(t);
+  }
+
+  /** True when the transition was new to us. */
+  #recordAlert(t: Transition): boolean {
     const prior = this.#alerts.get(t.s) ?? NO_ALERTS;
-    if (prior.some((p) => p.seq === t.seq)) return; // at-least-once delivery
+    if (prior.some((p) => p.seq === t.seq)) return false; // at-least-once delivery
     this.#alerts.set(t.s, Object.freeze([t, ...prior].slice(0, ALERT_CAP)));
     this.#setRegime(t.s, t.new_regime);
     this.#dirty.add(aKey(t.s));
     this.#emit();
-    for (const fn of this.#alertFns) fn(t);
+    return true;
   }
 
   setBars(bars: Record<string, readonly Bar[]>): void {
@@ -250,6 +272,23 @@ export class MarketStore {
       this.#dirty.add(bKey(s));
     }
     this.#emit();
+  }
+
+  /**
+   * "Try again", from the UI to whatever owns the connection.
+   *
+   * The store deliberately does not know what a socket is — it is fed by one in
+   * production and by a baked dataset on the published build. A callback keeps
+   * that split intact: the banner asks, and whoever is driving decides what
+   * reconnecting means.
+   */
+  onRefreshRequest = (fn: () => void): (() => void) => {
+    this.#refreshFns.add(fn);
+    return () => void this.#refreshFns.delete(fn);
+  };
+
+  requestRefresh(): void {
+    for (const fn of this.#refreshFns) fn();
   }
 
   setFeed(f: FeedStatus): void {

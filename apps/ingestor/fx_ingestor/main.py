@@ -67,6 +67,7 @@ class Ingestor:
             bucket_seconds=cfg.bucket_seconds,
             ewma_lambda=cfg.ewma_lambda,
             retention_s=cfg.stream_retention_s,
+            backfill_seed=cfg.replay_seed,
         )
         self.lease = LeaderLease(self.redis, cfg.lease_ttl_ms, cfg.lease_renew_ms)
         self.backoff = BackoffPolicy(cfg.backoff_base_s, cfg.backoff_cap_s)
@@ -262,6 +263,10 @@ class Ingestor:
                     # now - so if it is promoted mid-crisis it learns the crisis
                     # as "normal", reports NORMAL, and never emits the clear the
                     # stored 'stressed' row is waiting for.
+                    # Before anything else: a cold deployment has no past, and
+                    # an empty chart is indistinguishable from a broken one.
+                    # No-ops once history exists.
+                    await self.pipeline.backfill_history()
                     await self.pipeline.restore_detectors()
                     await self._run_as_leader()
                 if self.lease.lost.is_set() and not self._shutdown.is_set():

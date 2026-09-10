@@ -1,4 +1,4 @@
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as lwc from "../../test/lwc";
 
@@ -199,5 +199,103 @@ describe("lifecycle", () => {
       "aria-label",
       expect.stringContaining("EURUSD"),
     );
+  });
+});
+
+describe("provenance", () => {
+  /**
+   * This replaced a full-width amber band drawn under every synthesised bar.
+   * That was readable when a handful of minutes were backfilled, and became a
+   * solid block across the whole chart once 30 days of history were synthesised
+   * behind a young feed — distinguishing nothing and burying the candles it sat
+   * under. The boundary is the part worth showing.
+   */
+
+  /** Bars whose provenance is the point; `src` is the only field that varies. */
+  const mixed = (...srcs: string[]): Bar[] =>
+    srcs.map((src, i) => ({
+      t: T0 + i * 60,
+      o: 1.08,
+      h: 1.081,
+      l: 1.079,
+      c: 1.08,
+      n: 10,
+      src,
+    }));
+
+  const alertAt = (min: number): Transition => ({
+    s: "EURUSD",
+    seq: min,
+    ts: new Date((T0 + min * 60) * 1000).toISOString(),
+    old_regime: "normal",
+    new_regime: "stressed",
+    trigger_value: 3.4,
+    threshold_value: 3,
+    sigma: 0.0004,
+    cause: "threshold",
+    reason: "held",
+  });
+
+  const markers = () => lwc.chart!.candles.setMarkers.mock.calls.at(-1)?.[0] ?? [];
+  const boundary = () =>
+    markers().find((m: { text?: string }) => /live from here/i.test(String(m.text)));
+
+  it("marks where synthesised history ends and live data begins", () => {
+    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    mount("EURUSD");
+    expect(boundary()).toBeDefined();
+  });
+
+  it("places it on the first live bar, not the last synthetic one", () => {
+    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    mount("EURUSD");
+    expect(boundary()?.time).toBe(T0 + 120);
+  });
+
+  it("says nothing when every bar is live", () => {
+    // A marker on a chart with nothing synthesised is noise claiming to be
+    // information.
+    act(() => store.setBars({ EURUSD: mixed("stream", "stream") }));
+    mount("EURUSD");
+    expect(boundary()).toBeUndefined();
+  });
+
+  it("says nothing when every bar is synthesised", () => {
+    // There is no boundary inside this window; the caption carries it instead.
+    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
+    mount("EURUSD");
+    expect(boundary()).toBeUndefined();
+  });
+
+  it("states the proportion in text", () => {
+    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    mount("EURUSD");
+    expect(screen.getByText(/2 of 3 bars synthesised/i)).toBeInTheDocument();
+  });
+
+  it("calls a fully synthesised window what it is", () => {
+    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
+    mount("EURUSD");
+    expect(screen.getByText(/synthesised history/i)).toBeInTheDocument();
+  });
+
+  it("keeps markers ascending once the boundary is merged in", () => {
+    // Lightweight Charts silently misplaces markers given an unsorted list, so
+    // the boundary cannot simply be prepended to the alert markers.
+    //
+    // The alert is placed INSIDE the synthesised stretch, i.e. earlier than the
+    // boundary. That ordering is what makes the bug observable: prepending a
+    // late boundary to an early alert yields a descending list. An alert after
+    // the boundary would come out sorted either way and prove nothing.
+    const many = Array.from({ length: 40 }, (_, i) => (i < 30 ? "backfill" : "stream"));
+    act(() => {
+      store.setBars({ EURUSD: mixed(...many) });
+      store.pushAlert(alertAt(10)); // inside the backfilled span
+    });
+    mount("EURUSD");
+
+    const times = markers().map((m: { time: number }) => m.time);
+    expect(times.length).toBeGreaterThanOrEqual(2);
+    expect(times).toEqual([...times].sort((a: number, b: number) => a - b));
   });
 });

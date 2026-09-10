@@ -15,14 +15,31 @@
  * re-renders 40 pixels of header and nothing else.
  */
 
+import { useContext, useEffect, useState } from "react";
 import { humanDuration } from "../lib/regime";
-import { useConn, useFeed } from "../lib/stream/hooks";
+import { StoreCtx, useConn, useFeed } from "../lib/stream/hooks";
 
 type Tone = "ok" | "warn" | "bad";
+
+/** Re-render cadence for the age readout. The number is seconds, so anything
+ *  slower makes it visibly jump; anything faster is wasted work. */
+const CLOCK_MS = 1_000;
 
 export function StatusBanner() {
   const conn = useConn();
   const feed = useFeed();
+  const store = useContext(StoreCtx);
+
+  // Without this the age is computed once per store update. On a feed that has
+  // STOPPED there are no more updates by definition, so "last update 12s ago"
+  // froze at 12 and stayed there while the real age climbed into the hours —
+  // the one situation where the number matters most is the one where it stopped
+  // moving.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => tick((n) => n + 1), CLOCK_MS);
+    return () => window.clearInterval(t);
+  }, []);
   // `ts` is a liveness heartbeat, not the age of the last state change - see
   // FeedStatus. Reading the wrong one of those two is how this banner used to
   // report "Stale" over prices that were visibly updating.
@@ -65,6 +82,18 @@ export function StatusBanner() {
       <span className="status__dot" aria-hidden />
       <span className="status__label">{label}</span>
       {detail && <span className="status__detail">{detail}</span>}
+      {/* Offered only when something is actually wrong. A reconnect button on a
+          healthy feed is a button whose only effect is to interrupt it. */}
+      {tone !== "ok" && (
+        <button
+          type="button"
+          className="status__retry"
+          onClick={() => store?.requestRefresh()}
+          title="Reconnect and reload the snapshot"
+        >
+          Refresh
+        </button>
+      )}
     </div>
   );
 }
