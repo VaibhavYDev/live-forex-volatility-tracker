@@ -24,3 +24,5 @@ data/
 # Scratch space for delivery tarballs. The folder itself has to go by hand:
 # the desktop bridge refuses rm inside a connected folder.
 _to_delete/
+Claude outputs/
+_to_delete/

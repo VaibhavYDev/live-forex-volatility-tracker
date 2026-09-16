@@ -46,7 +46,16 @@ fx-worker = { workspace = true }
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-extend-exclude = ["apps/web"]
+# Markdown is excluded because ruff 0.16 began formatting fenced Python blocks in
+# prose by default (0.15 kept it behind preview), and it reformatted the class
+# sketches in ARCHITECTURE.md — collapsing column-aligned trailing comments that
+# are there to make the shape of a structure readable at a glance.
+#
+# Those snippets are illustrations, not compiled source. Letting a code formatter
+# rewrite them trades documentation quality for nothing, and it means a routine
+# lockfile bump can turn the build red with no change to the code. The formatter's
+# jurisdiction is the codebase.
+extend-exclude = ["apps/web", "*.md"]
 
 [tool.ruff.lint]
 select = [
