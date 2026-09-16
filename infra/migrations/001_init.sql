@@ -144,7 +144,12 @@ ALTER TABLE bars_1m SET (
     timescaledb.segmentby = 'symbol'
 );
 
-SELECT add_columnstore_policy('bars_1m', after => INTERVAL '7 days', if_not_exists => TRUE);
+-- CALL, not SELECT: the columnstore API is defined as procedures, while the
+-- older policy helpers are still functions returning a job id — which is why
+-- add_continuous_aggregate_policy above and add_retention_policy below are
+-- selected from and this one is not.
+CALL add_columnstore_policy('bars_1m', after => INTERVAL '7 days', if_not_exists => TRUE);
+
 SELECT add_retention_policy('bars_1m', INTERVAL '90 days', if_not_exists => TRUE);
 
 -- ----------------------------------------------------------------- alerts ----
