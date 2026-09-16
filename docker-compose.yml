@@ -45,7 +45,12 @@ services:
     # Full TimescaleDB (TSL), so continuous aggregates, native compression and
     # retention policies all work. Supabase ships only the Apache-2 edition and
     # has deprecated it on PG17 — see infra/migrations/002_supabase_partman.sql.
-    image: timescale/timescaledb:latest-pg16
+    # Pinned, not `latest-pg16`. That tag moved to 2.30 underneath this repo and
+    # broke `compose up` with no commit: 2.18 had renamed compression to the
+    # columnstore API, and the schema's policy call stopped applying, which kills
+    # the container during init. A moving tag means the stack can break while the
+    # code is untouched. Bump this deliberately, with the migration in hand.
+    image: timescale/timescaledb:2.30.0-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-fx}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fx}

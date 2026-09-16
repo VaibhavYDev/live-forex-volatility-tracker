@@ -24,7 +24,8 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s
           --health-timeout 3s --health-retries 10
       timescale:
-        image: timescale/timescaledb:latest-pg16
+        # Same pin as docker-compose.yml; see the note there.
+        image: timescale/timescaledb:2.30.0-pg16
         env:
           POSTGRES_USER: fx
           POSTGRES_PASSWORD: fx
