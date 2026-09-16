@@ -4,7 +4,10 @@ on:
   push: {branches: [main]}
   pull_request:
   schedule:
-    - cron: '0 2 * * *' # Nightly load test at 2 AM
+    # The load suite asserts the O(1) property, and an O(n) regression passes
+    # every functional test while degrading only after hours of uptime. Nightly
+    # rather than per-push because it takes minutes, not seconds.
+    - cron: "0 3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -54,16 +57,11 @@ jobs:
         env:
           TEST_REDIS_URL: redis://localhost:6379/15
           DATABASE_URL: postgresql://fx:fx@localhost:5432/fx
+          # Turns "service unreachable" from a silent skip into a build failure.
+          # Without it a broken service container reduces the suite to the unit
+          # tier and the badge stays green over 53 tests that never ran.
           FX_REQUIRE_SERVICES: "1"
         run: uv run pytest tests -q --timeout=90 --cov --cov-report=term-missing
-
-      - name: Load Tests (Nightly)
-        if: github.event_name == 'schedule'
-        env:
-          TEST_REDIS_URL: redis://localhost:6379/15
-          DATABASE_URL: postgresql://fx:fx@localhost:5432/fx
-          FX_REQUIRE_SERVICES: "1"
-        run: uv run pytest tests/load -m load -q
 
   web:
     runs-on: ubuntu-latest
@@ -73,11 +71,72 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
       - run: npm ci
+      # Typecheck first: it is the cheapest gate and its errors point at a line,
+      # whereas a type error surfacing through a test failure points at a symptom.
       - run: npx tsc --noEmit
       - run: npm run test:coverage
       - run: npm run build
 
+  demo:
+    # The published link is the most-clicked thing in this repo and the easiest
+    # to break silently, because docs/ is a committed artifact: nothing about
+    # editing the source makes it fail, it just quietly stops matching. So
+    # rebuild it, assert the committed copy is byte-identical, then load the
+    # result under every path shape a host might serve it from — a subpath, a
+    # domain root, a deep CDN path, the 404 fallback, and straight off disk.
+    #
+    # Four published demos in a row came up blank for path reasons that one
+    # eyeballed URL could not have caught, because the same file is correct
+    # under one prefix and broken under another.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
+      - run: npm ci
+        working-directory: apps/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+
+      - name: Rebuild the published bundle
+        run: |
+          cd apps/web && VITE_DEMO=1 npm run build
+          cd .. && node scripts/inline_demo.mjs
+
+      - name: Committed copy is identical to the rebuild
+        run: |
+          git diff --exit-code --stat docs/ \
+            || { echo "::error::docs/ is stale — run 'make demo' and commit the result"; exit 1; }
+
+      - name: The published page actually comes up
+        run: node scripts/verify_demo.mjs
+
+  load:
+    # Not a merge gate. The numbers behind docs/benchmarks.md need to execute
+    # somewhere other than on demand, but a benchmark on a shared runner is too
+    # noisy to block a pull request on.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --all-packages --frozen
+      - name: Benchmarks
+        env:
+          TEST_REDIS_URL: redis://localhost:6379/15
+          FX_REQUIRE_SERVICES: "1"
+        run: uv run pytest tests/load -m load -q -s --timeout=300
+
   compose:
+    # Proves the claim on the README's first screen: `docker compose up` works.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

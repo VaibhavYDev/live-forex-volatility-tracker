@@ -25,6 +25,13 @@ import type { Bar } from "../lib/stream/types";
 const STALE_AFTER_S = 75;
 const STALE_CHECK_MS = 15_000;
 
+/** Backoff for automatic retries, in checks. Rebuilding the socket every 15s
+ *  against an ingestor that is simply switched off is the same reconnect storm
+ *  the ingestor's own ladder exists to prevent — see MIN_HEALTHY_SESSION_S in
+ *  fx_ingestor/main.py. A dead feed is usually dead for hours, so the interval
+ *  has to grow: 15s, 30s, 60s ... capped at five minutes. */
+const MAX_BACKOFF_CHECKS = 20; // 20 x 15s = 5 minutes
+
 export function useForexStream(store: MarketStore, url: string, symbols: string[]): void {
   const key = symbols.join(",");
   // Bumping this tears the socket down and builds a new one. That is the whole
@@ -38,21 +45,41 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
     // WebSocket layer notices, so the page sits on "Stale" forever with a
     // perfectly healthy connection. Watch the heartbeat and rebuild when it
     // stops, which is the only signal that actually tracks the feed.
+    let ticks = 0;
+    let waitFor = 1; // checks to skip before the next automatic retry
+
     const watchdog = window.setInterval(() => {
       const ts = store.feed().ts;
       if (!ts) return;
+
       const age = (Date.now() - Date.parse(ts)) / 1000;
-      if (age > STALE_AFTER_S) setAttempt((n) => n + 1);
+      if (age <= STALE_AFTER_S) {
+        // Recovered. Reset so the next outage retries promptly rather than
+        // inheriting a five-minute wait from the last one.
+        ticks = 0;
+        waitFor = 1;
+        return;
+      }
+
+      // A backgrounded tab is not a broken feed. Browsers throttle timers in
+      // hidden tabs, so a laptop that slept wakes with a huge apparent age and
+      // would reconnect on the spot — before the user has even looked at it.
+      if (document.hidden) return;
+
+      if (++ticks < waitFor) return;
+      ticks = 0;
+      waitFor = Math.min(waitFor * 2, MAX_BACKOFF_CHECKS);
+      setAttempt((n) => n + 1);
     }, STALE_CHECK_MS);
     return () => window.clearInterval(watchdog);
   }, [store]);
 
   // Exposed so the banner's refresh control can force the same path a user
   // would otherwise get by reloading the page.
-  useEffect(() => {
-    const off = store.onRefreshRequest(() => setAttempt((n) => n + 1));
-    return off;
-  }, [store]);
+  // The manual control bypasses the backoff above. Someone who clicked Refresh
+  // is present and asking now; making them wait out an exponential delay they
+  // cannot see is the worst possible answer.
+  useEffect(() => store.onRefreshRequest(() => setAttempt((n) => n + 1)), [store]);
 
   useEffect(() => {
     // StrictMode mounts twice in dev, and a socket that is closing can still

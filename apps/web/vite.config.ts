@@ -3,10 +3,19 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
-  // GitHub Pages serves a project repo under /<repo>/, so the built asset URLs
-  // have to carry that prefix. Left at "/" for every other target, including
-  // the nginx image, which serves from the root.
-  base: process.env.VITE_BASE ?? "/",
+  // RELATIVE paths for the published build, absolute for everything else.
+  //
+  // GitHub Pages serves a project repo under /<repo>/, so an absolute "/assets/..."
+  // 404s there. Hardcoding "/<repo>/" instead only moves the problem: it then
+  // breaks if Pages is configured to serve from the repo root rather than /docs,
+  // or if the repository is ever renamed - and both failures look identical to a
+  // visitor, a blank page with one 404 in a console nobody opens.
+  //
+  // "./" is immune to all of it. The same bundle works under any subpath, at a
+  // domain root, and opened straight off disk. The nginx image keeps "/" because
+  // it always serves from the root and absolute paths survive client-side
+  // routing there.
+  base: process.env.VITE_BASE ?? (process.env.VITE_DEMO === "1" ? "./" : "/"),
   server: {
     host: "0.0.0.0",
     port: 5173,

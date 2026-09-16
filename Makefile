@@ -65,4 +65,15 @@ down: ## Stop everything
 clean: ## Stop and delete volumes (destroys stored bars)
 	docker compose --profile observability down -v
 
-.PHONY: help install lint fmt test test-unit test-chaos test-cov bench deps dev up observe down clean
+.PHONY: help install lint fmt test test-unit test-chaos test-cov bench deps dev up observe down clean demo-data demo demo-verify
+
+demo-data: ## Rebuild the published demo dataset from the real engine
+	uv run python scripts/build_demo_dataset.py apps/web/src/demo/dataset.json
+
+demo: ## Rebuild docs/ — the single-file bundle behind the public link
+	cd apps/web && VITE_DEMO=1 npm run build
+	node scripts/inline_demo.mjs
+	$(MAKE) demo-verify
+
+demo-verify: ## Load docs/index.html under every path shape a host might use
+	node scripts/verify_demo.mjs
