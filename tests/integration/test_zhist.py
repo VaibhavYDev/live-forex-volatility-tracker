@@ -29,7 +29,7 @@ from fx_ingestor.pipeline import IngestPipeline
 
 from tests.chaos.sine_feed import SineVolatilityFeed
 
-pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+pytestmark = pytest.mark.integration
 
 SYMBOL = "EURUSD"
 PERIOD = 120

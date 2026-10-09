@@ -18,7 +18,7 @@ from fx_ingestor.supervisor import StalenessWatchdog
 
 from tests.chaos.fault_server import FaultConfig, fault_server
 
-pytestmark = [pytest.mark.chaos, pytest.mark.anyio]
+pytestmark = pytest.mark.chaos
 
 
 class _PatchedTiingo(TiingoProvider):

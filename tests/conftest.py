@@ -50,11 +50,6 @@ def _unavailable(what: str, detail: str) -> None:
     pytest.skip(f"{what} unavailable: {detail}")
 
 
-@pytest.fixture(scope="session")
-def anyio_backend() -> str:
-    return "asyncio"
-
-
 @pytest.fixture
 async def redis() -> AsyncIterator[aioredis.Redis]:
     client = aioredis.Redis.from_url(REDIS_URL, decode_responses=True)

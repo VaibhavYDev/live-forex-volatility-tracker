@@ -21,7 +21,7 @@ from fx_ingestor.pipeline import IngestPipeline
 from fx_platform import LeaderLease
 from fx_worker.persister import Persister, run_forever
 
-pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+pytestmark = pytest.mark.integration
 
 SYMBOLS = ["EURUSD", "GBPUSD"]
 

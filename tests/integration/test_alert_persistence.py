@@ -23,7 +23,7 @@ from fx_worker.alerts import (
 )
 from fx_worker.db import Database
 
-pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+pytestmark = pytest.mark.integration
 
 T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 

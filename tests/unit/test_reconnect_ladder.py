@@ -40,8 +40,6 @@ from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import MIN_HEALTHY_SESSION_S, Ingestor
 from fx_ingestor.supervisor import BreakerState
 
-pytestmark = pytest.mark.anyio
-
 
 class FakeClock:
     """Monotonic time we control, so 'the session lasted an hour' costs no hour."""
@@ -77,11 +75,6 @@ def build(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> tuple[Ingestor, 
 
     monkeypatch.setattr(ing, "_publish_status", noop_status)
     return ing, slept
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
 
 
 async def _drive(ing: Ingestor, session_s: float, rounds: int, clock: FakeClock) -> None:
