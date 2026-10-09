@@ -32,7 +32,10 @@ const mount = () =>
     </StoreCtx.Provider>,
   );
 
-const feed = (state: FeedState, opts: { ts?: string; since?: string; detail?: string } = {}) =>
+const feed = (
+  state: FeedState,
+  opts: { ts?: string; since?: string; detail?: string; provider?: string } = {},
+) =>
   act(() => {
     store.setConn("open", 0);
     store.setFeed({ state, ...opts });
@@ -76,8 +79,34 @@ describe("liveness", () => {
     mount();
 
     const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Live");
+    expect(banner).toHaveTextContent("Waiting for feed");
     expect(banner).not.toHaveTextContent(/stale/i);
+    // Nor the opposite lie: no status is not a healthy feed.
+    expect(banner).not.toHaveTextContent("Live");
+  });
+
+  it("reports an ingestor that shut down instead of reading Live", () => {
+    feed("stopped", { ts: ago(1) });
+    mount();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Feed stopped");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Live");
+  });
+
+  it("never presents the synthetic replay feed as live market data", () => {
+    feed("healthy", { ts: ago(1), provider: "replay" });
+    mount();
+
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Simulated");
+    expect(banner).not.toHaveTextContent("Live");
+  });
+
+  it("reads Live for a real provider", () => {
+    feed("healthy", { ts: ago(1), provider: "tiingo" });
+    mount();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Live");
   });
 
   it("shows Connecting before the socket is up, not Live", () => {

@@ -147,11 +147,14 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
   // Snapshot: replace the whole series in one call rather than N updates.
   useEffect(() => {
     const series = candles.current;
-    if (!series || bars.length === 0) return;
+    if (!series) return;
 
+    // Empty still replaces: otherwise the previous pair's candles stay drawn
+    // under this pair's name until its history arrives, or forever if it fails.
     series.setData(
       bars.map((b) => ({ time: b.t as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })),
     );
+    if (bars.length === 0) return;
     live.current = { ...bars[bars.length - 1]! };
     setLast(bars[bars.length - 1]!.c);
 
@@ -170,7 +173,12 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
   // one there.
   useEffect(() => {
     const series = candles.current;
-    if (!series || bars.length === 0) return;
+    if (!series) return;
+    if (bars.length === 0) {
+      shade.current?.setData([]);
+      series.setMarkers([]);
+      return;
+    }
 
     const from = bars[0]!.t;
     // Through the END of the last bar; see BAR_S in lib/regime.
@@ -317,6 +325,11 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
         {loading && !error && (
           <span className="chart__note" role="status">
             Loading {tf}…
+          </span>
+        )}
+        {bars.length === 0 && !loading && !error && (
+          <span className="chart__note" role="status">
+            Waiting for {symbol} history…
           </span>
         )}
         {synthetic > 0 && !loading && (

@@ -11,8 +11,9 @@ Keeping them apart is what stops "just one import" from dragging Redis into the
 volatility maths and making the unit tests need a container.
 """
 
+from fx_platform.leader import LeaderLease
 from fx_platform.logging import configure_logging
 from fx_platform.metrics import serve_metrics
 from fx_platform.redis_client import close_redis, make_redis
 
-__all__ = ["close_redis", "configure_logging", "make_redis", "serve_metrics"]
+__all__ = ["LeaderLease", "close_redis", "configure_logging", "make_redis", "serve_metrics"]

@@ -14,6 +14,7 @@ import pytest
 import redis.asyncio as aioredis
 from fx_core import keys
 from fx_core.alerts import RegimeDetector
+from fx_core.models import Bar
 from fx_worker.alerts import (
     ALERTS_MALFORMED,
     ALERTS_REDELIVERED,
@@ -235,3 +236,25 @@ class TestSnapshotRoundTripThroughRedis:
         assert revived.baseline.n == detector.baseline.n
         assert revived.baseline.mean == pytest.approx(detector.baseline.mean)
         assert revived.profile.factors() == pytest.approx(detector.profile.factors())
+
+
+async def test_the_bar_watermark_compares_stream_ids_numerically(db: Database) -> None:
+    """As text '...-10' > '...-9' is false, so the later batch would be skipped."""
+    bucket = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+    bar = Bar("EURUSD", bucket, 1.0842, 1.0842, 1.0842, 1.0842, 1, 0.0, 0.0)
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM bars_1m WHERE symbol = 'EURUSD' AND bucket = $1", bucket)
+    try:
+        await db.upsert_bars([(bar, "1791557180174-9")])
+        await db.upsert_bars([(bar, "1791557180174-10")])
+        async with db.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT tick_count FROM bars_1m WHERE symbol = 'EURUSD' AND bucket = $1", bucket
+            )
+    finally:
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM bars_1m WHERE symbol = 'EURUSD' AND bucket = $1", bucket
+            )
+
+    assert count == 2

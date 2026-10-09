@@ -60,33 +60,40 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // The previous pair's figures must not stay up under this pair's name while
+    // its request is in flight, nor after it fails.
+    setCompare(null);
+    setError(null);
     if (isDemo()) {
       // Computed by the real estimators at build time; nothing to request.
       setCompare(demoCompare(symbol));
-      setError(null);
       return;
     }
-    let cancelled = false;
+    const request = new AbortController();
     const load = async () => {
       try {
-        const res = await fetch(`${API}/api/volatility/${symbol}/compare?limit=120`);
+        const res = await fetch(`${API}/api/volatility/${symbol}/compare?limit=120`, {
+          signal: request.signal,
+        });
         if (!res.ok) {
-          if (!cancelled) setError(res.status === 409 ? "warming up" : `HTTP ${res.status}`);
+          if (!request.signal.aborted) {
+            setError(res.status === 409 ? "warming up" : `HTTP ${res.status}`);
+          }
           return;
         }
         const data = (await res.json()) as CompareResponse;
-        if (!cancelled) {
+        if (!request.signal.aborted) {
           setCompare(data);
           setError(null);
         }
       } catch {
-        if (!cancelled) setError("unreachable");
+        if (!request.signal.aborted) setError("unreachable");
       }
     };
     void load();
     const timer = window.setInterval(load, 15_000);
     return () => {
-      cancelled = true;
+      request.abort();
       window.clearInterval(timer);
     };
   }, [symbol]);
@@ -113,7 +120,7 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
         <div>
           <span className="k">spread</span>
           <span className="v">
-            {quote ? ((quote.ask - quote.bid) * 10_000).toFixed(1) : "—"} pips
+            {quote ? ((quote.ask - quote.bid) * 10 ** (dp - 1)).toFixed(1) : "—"} pips
           </span>
         </div>
       </div>
@@ -153,6 +160,7 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
 
       <h3>Estimators, same bars</h3>
       {error && <p className="muted">Comparison unavailable ({error}).</p>}
+      {!compare && !error && <p className="muted">Loading…</p>}
       {compare && (
         <>
           <table className="estimators">
@@ -169,7 +177,11 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
             </tbody>
           </table>
           <p className="muted">
-            {compare.bars_used} bars · {compare.window_s / 60} min window ·{" "}
+            {compare.bars_used} bars ·{" "}
+            <span title="Approximate standard error of the close-to-close estimate from this many bars; the range estimators are tighter.">
+              ±{Math.round(100 / Math.sqrt(2 * Math.max(compare.bars_used - 2, 1)))}% sampling error
+            </span>{" "}
+            · {compare.window_s / 60} min window ·{" "}
             {compare.annualization_basis}
           </p>
         </>

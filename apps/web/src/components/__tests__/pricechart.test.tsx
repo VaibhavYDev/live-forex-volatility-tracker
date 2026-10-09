@@ -87,6 +87,38 @@ describe("the in-flight bar", () => {
     }
   });
 
+  it("clears the previous pair's candles when the new pair has no history yet", () => {
+    act(() => {
+      store.setBars({ EURUSD: bars(3, 1.0842) });
+      store.pushAlert({
+        s: "EURUSD",
+        seq: 1,
+        ts: new Date((T0 + 60) * 1000).toISOString(),
+        old_regime: "normal",
+        new_regime: "stressed",
+        trigger_value: 3.4,
+        threshold_value: 3,
+        sigma: 0.0004,
+        cause: "threshold",
+        reason: "held",
+      });
+    });
+    const view = mount("EURUSD");
+    expect(lwc.chart!.candles.setData.mock.calls.at(-1)![0]).toHaveLength(3);
+
+    view.rerender(
+      <ThemeProvider>
+        <StoreCtx.Provider value={store}>
+          <PriceChart symbol="USDJPY" />
+        </StoreCtx.Provider>
+      </ThemeProvider>,
+    );
+
+    expect(lwc.chart!.candles.setData.mock.calls.at(-1)![0]).toEqual([]);
+    expect(lwc.chart!.candles.setMarkers.mock.calls.at(-1)![0]).toEqual([]);
+    expect(screen.getByText("Waiting for USDJPY history…")).toBeInTheDocument();
+  });
+
   it("merges ticks within a minute and opens a new bar across the boundary", () => {
     act(() => store.setBars({ EURUSD: bars(2, 1.08) }));
     mount("EURUSD");

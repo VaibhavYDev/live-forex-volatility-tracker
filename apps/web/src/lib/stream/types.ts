@@ -72,6 +72,8 @@ export interface FeedStatus {
   /** When the state last CHANGED. Lets the banner say "degraded for 12 minutes"
    *  instead of just "degraded". */
   readonly since?: string;
+  /** "replay" is the synthetic generator, not a market feed. */
+  readonly provider?: string;
 }
 
 export interface Conn {

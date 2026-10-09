@@ -40,7 +40,6 @@ class EwmaVariance:
     lam: float = 0.97
     variance: float = 0.0
     n: int = 0
-    _debias: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 < self.lam < 1.0:
@@ -61,23 +60,11 @@ class EwmaVariance:
             self.variance = self.lam * self.variance + (1.0 - self.lam) * ret * ret
 
         self.n += 1
-        self._debias = self.lam * self._debias + (1.0 - self.lam)
         return self.variance
 
     @property
     def sigma(self) -> float:
         return math.sqrt(max(self.variance, 0.0))
-
-    @property
-    def bias_corrected_variance(self) -> float:
-        """Adam-style correction for the early-sample downward bias."""
-        if self._debias <= 0.0:
-            return self.variance
-        return self.variance / self._debias
-
-    @property
-    def bias_corrected_sigma(self) -> float:
-        return math.sqrt(max(self.bias_corrected_variance, 0.0))
 
     @property
     def warmed_up(self) -> bool:
@@ -95,4 +82,3 @@ class EwmaVariance:
     def reset(self) -> None:
         self.variance = 0.0
         self.n = 0
-        self._debias = 0.0

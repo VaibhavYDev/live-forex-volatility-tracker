@@ -51,7 +51,8 @@ export function DemoProvider({ children }: { children: ReactNode }) {
     store.setBars(bars);
     store.setConn("open", 0);
 
-    const beat = () => store.setFeed({ state: "healthy", ts: new Date().toISOString() });
+    const beat = () =>
+      store.setFeed({ state: "healthy", ts: new Date().toISOString(), provider: "replay" });
     beat();
     const heart = window.setInterval(beat, HEARTBEAT_MS);
 

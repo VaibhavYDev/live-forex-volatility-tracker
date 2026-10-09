@@ -23,10 +23,9 @@ from datetime import UTC, datetime
 
 import structlog
 from fx_core import keys
-from fx_platform import close_redis, configure_logging, make_redis, serve_metrics
+from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
 
 from fx_ingestor.config import IngestorSettings
-from fx_ingestor.leader import LeaderLease
 from fx_ingestor.pipeline import IngestPipeline
 from fx_ingestor.providers import ProviderAuthError, ProviderError, build_provider
 from fx_ingestor.supervisor import BackoffPolicy, CircuitBreaker, StalenessWatchdog
@@ -69,7 +68,9 @@ class Ingestor:
             retention_s=cfg.stream_retention_s,
             backfill_seed=cfg.replay_seed,
         )
-        self.lease = LeaderLease(self.redis, cfg.lease_ttl_ms, cfg.lease_renew_ms)
+        self.lease = LeaderLease(
+            self.redis, keys.LEADER_LEASE, cfg.lease_ttl_ms, cfg.lease_renew_ms
+        )
         self.backoff = BackoffPolicy(cfg.backoff_base_s, cfg.backoff_cap_s)
         self.breaker = CircuitBreaker(cfg.breaker_fail_threshold, cfg.breaker_reset_s)
         self._shutdown = asyncio.Event()

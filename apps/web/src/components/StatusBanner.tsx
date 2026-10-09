@@ -69,10 +69,22 @@ export function StatusBanner() {
     tone = "bad";
     label = "Feed stopped";
     detail = (feed.detail || "no upstream connection") + heldFor;
+  } else if (feed.state === "stopped") {
+    tone = "bad";
+    label = "Feed stopped";
+    detail = "ingestor shut down" + heldFor;
+  } else if (feed.state === "unknown") {
+    // No status yet, or the server has none to give: not an outage, not Live.
+    tone = "warn";
+    label = "Waiting for feed";
+    detail = feed.detail ?? "";
   } else if (ageS !== null && ageS > 60) {
     tone = "warn";
     label = "Stale";
     detail = `last update ${Math.round(ageS)}s ago`;
+  } else if (feed.provider === "replay") {
+    label = "Simulated";
+    detail = "replay feed · synthetic prices, not market data";
   }
 
   return (

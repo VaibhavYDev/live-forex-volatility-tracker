@@ -36,10 +36,12 @@ jobs:
           --health-timeout 3s --health-retries 15
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with: {enable-cache: true}
-      - run: uv sync --all-packages --frozen
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with: {enable-cache: true, python-version: "3.12"}
+      # --locked, not --frozen: a lockfile that disagrees with pyproject.toml must
+      # fail here, or the first `uv run` re-resolves it and tests something else.
+      - run: uv sync --all-packages --locked
 
       - name: Format
         run: uv run ruff format --check .
@@ -74,8 +76,8 @@ jobs:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: apps/web}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
       - run: npm ci
       # Typecheck first: it is the cheapest gate and its errors point at a line,
@@ -97,8 +99,8 @@ jobs:
     # under one prefix and broken under another.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
       - run: npm ci
         working-directory: apps/web
@@ -135,10 +137,10 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s
           --health-timeout 3s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with: {enable-cache: true}
-      - run: uv sync --all-packages --frozen
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with: {enable-cache: true, python-version: "3.12"}
+      - run: uv sync --all-packages --locked
       - name: Benchmarks
         env:
           TEST_REDIS_URL: redis://localhost:6379/15
@@ -149,7 +151,7 @@ jobs:
     # Proves the claim on the README's first screen: `docker compose up` works.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cp .env.example .env
       - run: docker compose config --quiet
       - run: docker compose build --parallel

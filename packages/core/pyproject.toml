@@ -3,9 +3,10 @@ name = "fx-core"
 version = "0.1.0"
 description = "Pure domain logic: models, volatility estimators, FX session calendar. No I/O."
 requires-python = ">=3.11"
-# INTENTIONALLY EMPTY. fx_core is stdlib-only so it unit-tests in milliseconds
-# and a contributor can add an estimator without understanding the streaming layer.
-dependencies = []
+# fx_core is stdlib-only so it unit-tests in milliseconds and a contributor can
+# add an estimator without understanding the streaming layer. tzdata is not code:
+# it is the IANA database zoneinfo needs on Windows, which ships none.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [build-system]
 requires = ["hatchling"]
