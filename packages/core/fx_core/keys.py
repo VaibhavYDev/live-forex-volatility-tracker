@@ -48,6 +48,9 @@ STREAM_TICKS: Final = "stream:ticks"
 CONSUMER_GROUP: Final = "cg:persisters"
 LEADER_LEASE: Final = "lock:ingestor:leader"
 PERSISTER_LEASE: Final = "lock:worker:persister"
+# Which provider produced the history and detector state below. Durable, so a
+# switch is detected rather than one feed's past being served as another's.
+PROVIDER: Final = "meta:provider"
 
 # Regime transitions get their OWN write-ahead log, not a second message type on
 # stream:ticks. Three reasons, all of which bite later if you merge them:
@@ -72,7 +75,9 @@ ALERT_MAXLEN: Final = 10_000  # ~ years of transitions; trimmed only as a backst
 # learn, so an expiry would silently cost days of alerting quality every time a
 # pair went quiet over a long weekend. It is ~1 KB per symbol; the invariant is
 # worth more than the bytes.
-DURABLE_KEYS: Final = frozenset({STREAM_TICKS, STREAM_ALERTS, LEADER_LEASE, PERSISTER_LEASE})
+DURABLE_KEYS: Final = frozenset(
+    {STREAM_TICKS, STREAM_ALERTS, LEADER_LEASE, PERSISTER_LEASE, PROVIDER}
+)
 
 # --- disposable: always TTL'd ------------------------------------------------
 TTL_QUOTE_S: Final = 300

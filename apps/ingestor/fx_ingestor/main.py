@@ -218,6 +218,14 @@ class Ingestor:
                         attempt += 1
                     await asyncio.sleep(delay)
 
+    async def _adopt_provider(self) -> None:
+        """Never serve one provider's past as another's: replay prices, a real feed's
+        prices and their detector baselines do not belong in one series."""
+        previous = await self.redis.set(keys.PROVIDER, self.cfg.provider, get=True)
+        if previous is not None and previous != self.cfg.provider:
+            log.error("provider.switched", previous=previous, current=self.cfg.provider)
+            await self.pipeline.reset_history()
+
     def _since(self) -> str:
         return self._last_status.get("since", self._last_status.get("ts", ""))
 
@@ -267,6 +275,7 @@ class Ingestor:
                     # Before anything else: a cold deployment has no past, and
                     # an empty chart is indistinguishable from a broken one.
                     # No-ops once history exists.
+                    await self._adopt_provider()
                     await self.pipeline.backfill_history()
                     await self.pipeline.restore_detectors()
                     await self._run_as_leader()

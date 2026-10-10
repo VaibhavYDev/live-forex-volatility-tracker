@@ -461,6 +461,21 @@ class IngestPipeline:
         ).inc()
 
     # ----------------------------------------------------------- rehydration
+    async def reset_history(self) -> None:
+        """Drop the history and detector state another provider produced."""
+        await self._redis.delete(
+            *(
+                key
+                for symbol in self.symbols
+                for key in (
+                    keys.history(symbol),
+                    keys.history(symbol, "1d"),
+                    keys.zhist(symbol),
+                    keys.regime_state(symbol),
+                )
+            )
+        )
+
     async def backfill_history(self) -> int:
         """Give a cold deployment a past, once.
 

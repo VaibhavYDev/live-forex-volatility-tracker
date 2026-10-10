@@ -5,8 +5,8 @@ Endpoint: ``wss://api.tiingo.com/fx``  (free plan includes the firehose)
 The wire format is a **positional array**, which is exactly why this class exists:
 
     {"service": "fx", "messageType": "A",
-     "data": ["Q", "eurusd", "2026-08-22T09:00:00.123Z", bidSize, bid, mid, ask, askSize]}
-              0     1         2                          3        4    5    6    7
+     "data": ["Q", "eurusd", "2026-08-22T09:00:00.123Z", bidSize, bid, mid, askSize, ask]}
+              0     1         2                          3        4    5    6        7
 
 Positional payloads are brittle by construction - the provider can insert a field
 and every naive consumer silently misreads every price after it. So we validate
@@ -22,6 +22,7 @@ quiet market from a dead socket. See ``fx_ingestor.supervisor``.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
@@ -139,11 +140,16 @@ class TiingoProvider(MarketDataProvider):
             tick = Tick(
                 symbol=str(data[1]).upper(),
                 bid=float(data[4]),
-                ask=float(data[6]),
+                ask=float(data[7]),
                 ts_event=ts_event,
                 ts_ingest=datetime.now(UTC),
             )
             tick.validate()
+            # The frame carries its own mid: a field read from the wrong position
+            # disagrees with it, where reading askSize as the ask once passed every
+            # other check and stored USDJPY at 500079.
+            if not math.isclose(tick.mid, float(data[5]), rel_tol=1e-5):
+                raise ValueError(f"mid {data[5]} disagrees with bid {tick.bid} / ask {tick.ask}")
         except (TypeError, ValueError) as exc:
             self.dropped_frames += 1
             log.debug("tiingo.malformed_frame", error=str(exc))

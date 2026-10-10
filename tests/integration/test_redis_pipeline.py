@@ -17,9 +17,13 @@ import pytest
 import redis.asyncio as aioredis
 from fx_core import keys
 from fx_core.models import Bar, Tick, bars_per_year
+from fx_ingestor.config import IngestorSettings
+from fx_ingestor.main import Ingestor
 from fx_ingestor.pipeline import IngestPipeline
-from fx_platform import LeaderLease
+from fx_platform import LeaderLease, close_redis
 from fx_worker.persister import Persister, run_forever
+
+from tests.conftest import REDIS_URL
 
 pytestmark = pytest.mark.integration
 
@@ -145,6 +149,47 @@ class TestIngestPipeline:
 
         history = await redis.zrange(keys.history("EURUSD"), 0, -1)
         assert len(history) == 1
+
+
+class TestProviderSwitch:
+    async def _adopt(self, provider: str) -> None:
+        ingestor = Ingestor(
+            IngestorSettings(FX_PROVIDER=provider, FX_SYMBOLS="USDJPY", REDIS_URL=REDIS_URL)
+        )
+        await ingestor._adopt_provider()
+        await close_redis(ingestor.redis)
+
+    async def _seed_state(self, redis: aioredis.Redis) -> list[str]:
+        derived = [keys.history("USDJPY"), keys.zhist("USDJPY"), keys.regime_state("USDJPY")]
+        await redis.zadd(derived[0], {_bar_json(500079.172): 1791561180})
+        await redis.zadd(derived[1], {'{"t": 1791561180, "z": -32.4}': 1791561180})
+        await redis.set(derived[2], "{}")
+        return derived
+
+    async def test_a_new_provider_does_not_inherit_the_previous_ones_state(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """Replay resumed on Tiingo's bars and detector baselines, and nothing said so."""
+        await redis.set(keys.PROVIDER, "tiingo")
+        derived = await self._seed_state(redis)
+
+        await self._adopt("replay")
+
+        assert await redis.get(keys.PROVIDER) == "replay"
+        assert await redis.exists(*derived) == 0
+
+    async def test_a_first_start_keeps_existing_state(self, redis: aioredis.Redis) -> None:
+        """No marker yet is not a switch: deploying the guard must not wipe anything."""
+        derived = await self._seed_state(redis)
+
+        await self._adopt("replay")
+
+        assert await redis.get(keys.PROVIDER) == "replay"
+        assert await redis.exists(*derived) == len(derived)
+
+
+def _bar_json(price: float) -> str:
+    return json.dumps({"t": 1791561180, "o": price, "h": price, "l": price, "c": price, "n": 1})
 
 
 class TestVolatilityAnnualisation:
