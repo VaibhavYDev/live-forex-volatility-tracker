@@ -104,6 +104,36 @@ _BACKFILL_PLAN: tuple[tuple[str, int, int], ...] = (
     ("1d", 86_400, 3_650),  # 10 years
 )
 
+# One atomic step, so a crash cannot leave two providers' state half-swapped.
+# KEYS: the provider marker, then (live, parked, restored) per state key, then
+# caches to drop. ARGV: the marker value read beforehand, the new provider, and
+# the number of state keys.
+_ADOPT_PROVIDER_LUA = """
+if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then
+    return redis.error_reply('provider marker changed concurrently')
+end
+for i = 2, 3 * tonumber(ARGV[3]) + 1, 3 do
+    if redis.call('EXISTS', KEYS[i]) == 1 and redis.call('EXISTS', KEYS[i + 1]) == 1 then
+        return redis.error_reply('refusing to overwrite ' .. KEYS[i + 1])
+    end
+end
+local parked = 0
+for i = 2, 3 * tonumber(ARGV[3]) + 1, 3 do
+    if redis.call('EXISTS', KEYS[i]) == 1 then
+        redis.call('RENAME', KEYS[i], KEYS[i + 1])
+        parked = parked + 1
+    end
+    if redis.call('EXISTS', KEYS[i + 2]) == 1 then
+        redis.call('RENAME', KEYS[i + 2], KEYS[i])
+    end
+end
+for i = 3 * tonumber(ARGV[3]) + 2, #KEYS do
+    redis.call('DEL', KEYS[i])
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return parked
+"""
+
 #: (price, annual_vol, pip) for a symbol the replay provider has no spec for.
 _BACKFILL_FALLBACK = (1.0000, 0.080, 0.0001)
 
@@ -461,20 +491,44 @@ class IngestPipeline:
         ).inc()
 
     # ----------------------------------------------------------- rehydration
-    async def reset_history(self) -> None:
-        """Drop the history and detector state another provider produced."""
-        await self._redis.delete(
-            *(
-                key
-                for symbol in self.symbols
-                for key in (
-                    keys.history(symbol),
-                    keys.history(symbol, "1d"),
-                    keys.zhist(symbol),
-                    keys.regime_state(symbol),
-                )
+    async def adopt_provider(self, provider: str) -> tuple[str, int] | None:
+        """Leave only this provider's history and detector state live.
+
+        The previous provider's are renamed under ``keys.archive`` rather than
+        deleted, and this provider's own archive, if any, comes back. State with
+        no recorded provider is parked as "unverified": nothing proves which feed
+        produced it. Quote and volatility caches describe the old feed and go.
+        Returns (previous provider, keys parked) when the provider changed.
+        """
+        previous = await self._redis.get(keys.PROVIDER)
+        if previous == provider:
+            return None
+        label = str(previous or "unverified")
+        state = [
+            key
+            for symbol in self.symbols
+            for key in (
+                keys.history(symbol),
+                keys.history(symbol, "1d"),
+                keys.zhist(symbol),
+                keys.regime_state(symbol),
             )
+        ]
+        moves = [
+            k for key in state for k in (key, keys.archive(label, key), keys.archive(provider, key))
+        ]
+        caches = [k for s in self.symbols for k in (keys.quote(s), keys.vol_state(s, "1h"))]
+        parked = await self._redis.eval(
+            _ADOPT_PROVIDER_LUA,
+            1 + len(moves) + len(caches),
+            keys.PROVIDER,
+            *moves,
+            *caches,
+            previous or "",
+            provider,
+            len(state),
         )
+        return label, int(parked)
 
     async def backfill_history(self) -> int:
         """Give a cold deployment a past, once.

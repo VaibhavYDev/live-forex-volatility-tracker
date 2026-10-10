@@ -48,7 +48,10 @@ repository rather than out of JavaScript imitating it.
 That is the whole demo path, and it needs no API key: the default provider is
 `replay`, a deterministic synthetic feed whose per-minute realised volatility is
 exactly what it claims. Set `FX_PROVIDER=tiingo` and `FX_PROVIDER_TOKEN=...` for
-a live feed.
+a live feed. A live chart starts empty and fills only with real quotes; switching
+provider sets the previous one's history and detector state aside in Redis under
+`archive:<provider>:` (cached history keeps its 24-hour expiry) and restores them
+if you switch back.
 
 Every address below is on **your own machine** and answers only while the stack
 above is running.

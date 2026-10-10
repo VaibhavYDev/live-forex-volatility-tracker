@@ -107,6 +107,11 @@ FEED_STATUS: Final = "feed:status"
 TTL_STATUS_S: Final = 30
 
 
+def archive(provider: str, key: str) -> str:
+    """Where a provider's history and detector state wait while another provider runs."""
+    return f"archive:{provider}:{key}"
+
+
 def quote(symbol: str) -> str:
     """Last top-of-book. Serves the cold-start snapshot without touching Postgres."""
     return f"q:{symbol}"

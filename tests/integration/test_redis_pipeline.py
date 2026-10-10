@@ -151,45 +151,114 @@ class TestIngestPipeline:
         assert len(history) == 1
 
 
-class TestProviderSwitch:
-    async def _adopt(self, provider: str) -> None:
+class TestProviderIsolation:
+    """Live mode never invents a past, and no provider is served another's."""
+
+    STATE = (keys.history("USDJPY"), keys.zhist("USDJPY"), keys.regime_state("USDJPY"))
+
+    async def _start(self, provider: str) -> None:
         ingestor = Ingestor(
-            IngestorSettings(FX_PROVIDER=provider, FX_SYMBOLS="USDJPY", REDIS_URL=REDIS_URL)
+            IngestorSettings(
+                FX_PROVIDER=provider,
+                FX_PROVIDER_TOKEN="t",
+                FX_SYMBOLS="USDJPY",
+                REDIS_URL=REDIS_URL,
+            )
         )
-        await ingestor._adopt_provider()
-        await close_redis(ingestor.redis)
+        try:
+            await ingestor._rehydrate()
+        finally:
+            await close_redis(ingestor.redis)
 
-    async def _seed_state(self, redis: aioredis.Redis) -> list[str]:
-        derived = [keys.history("USDJPY"), keys.zhist("USDJPY"), keys.regime_state("USDJPY")]
-        await redis.zadd(derived[0], {_bar_json(500079.172): 1791561180})
-        await redis.zadd(derived[1], {'{"t": 1791561180, "z": -32.4}': 1791561180})
-        await redis.set(derived[2], "{}")
-        return derived
+    async def _sources(self, redis: aioredis.Redis, key: str) -> set[str]:
+        return {json.loads(m)["src"] for m in await redis.zrange(key, 0, -1)}
 
-    async def test_a_new_provider_does_not_inherit_the_previous_ones_state(
+    async def test_a_live_feed_starts_without_synthetic_history(
         self, redis: aioredis.Redis
     ) -> None:
-        """Replay resumed on Tiingo's bars and detector baselines, and nothing said so."""
-        await redis.set(keys.PROVIDER, "tiingo")
-        derived = await self._seed_state(redis)
+        await self._start("tiingo")
 
-        await self._adopt("replay")
+        assert await redis.exists(keys.history("USDJPY"), keys.history("USDJPY", "1d")) == 0
+        assert await redis.get(keys.PROVIDER) == "tiingo"
 
-        assert await redis.get(keys.PROVIDER) == "replay"
-        assert await redis.exists(*derived) == 0
+    async def test_the_simulator_starts_with_its_synthetic_history(
+        self, redis: aioredis.Redis
+    ) -> None:
+        await self._start("replay")
 
-    async def test_a_first_start_keeps_existing_state(self, redis: aioredis.Redis) -> None:
-        """No marker yet is not a switch: deploying the guard must not wipe anything."""
-        derived = await self._seed_state(redis)
+        assert await self._sources(redis, keys.history("USDJPY")) == {"backfill"}
 
-        await self._adopt("replay")
+    async def test_switching_to_a_live_feed_parks_the_simulation(
+        self, redis: aioredis.Redis
+    ) -> None:
+        await self._start("replay")
+        await redis.set(keys.regime_state("USDJPY"), "{}")
+        await redis.hset(keys.quote("USDJPY"), mapping={"mid": "147.2"})
+        await redis.hset(keys.vol_state("USDJPY", "1h"), mapping={"sigma": "0.1"})
 
-        assert await redis.get(keys.PROVIDER) == "replay"
-        assert await redis.exists(*derived) == len(derived)
+        await self._start("tiingo")
+
+        assert await redis.exists(*self.STATE) == 0
+        assert await redis.exists(keys.quote("USDJPY"), keys.vol_state("USDJPY", "1h")) == 0
+        parked = keys.archive("replay", keys.history("USDJPY"))
+        assert await self._sources(redis, parked) == {"backfill"}
+        assert await redis.get(keys.archive("replay", keys.regime_state("USDJPY"))) == "{}"
+
+    async def test_switching_back_restores_each_providers_own_state(
+        self, redis: aioredis.Redis
+    ) -> None:
+        await self._start("replay")
+        simulated = await redis.zcard(keys.history("USDJPY"))
+        await self._start("tiingo")
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
+
+        await self._start("replay")
+
+        assert await redis.zcard(keys.history("USDJPY")) == simulated
+        tiingo = keys.archive("tiingo", keys.history("USDJPY"))
+        assert await self._sources(redis, tiingo) == {"stream"}
+
+    async def test_restarting_with_the_same_provider_keeps_its_history(
+        self, redis: aioredis.Redis
+    ) -> None:
+        await self._start("tiingo")
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
+
+        await self._start("tiingo")
+
+        assert await self._sources(redis, keys.history("USDJPY")) == {"stream"}
+        assert not [k async for k in redis.scan_iter("archive:*")]
+
+    async def test_history_of_unknown_provenance_is_parked_not_reused(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """The installation that predates the marker, holding Tiingo bars stored at 500079."""
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(500079.172, "stream"): 1791561180})
+        await redis.set(keys.regime_state("USDJPY"), "{}")
+
+        await self._start("tiingo")
+
+        assert await redis.exists(*self.STATE) == 0
+        kept = await redis.zrange(keys.archive("unverified", keys.history("USDJPY")), 0, -1)
+        assert [json.loads(m)["c"] for m in kept] == [500079.172]
+
+    async def test_an_occupied_archive_is_never_overwritten(self, redis: aioredis.Redis) -> None:
+        """A second unmarked start would otherwise replace the first parked history."""
+        parked = keys.archive("unverified", keys.history("USDJPY"))
+        await redis.zadd(parked, {_bar_json(500079.172, "stream"): 1791561180})
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
+
+        with pytest.raises(aioredis.ResponseError, match="refusing to overwrite"):
+            await self._start("tiingo")
+
+        assert await redis.zcard(parked) == await redis.zcard(keys.history("USDJPY")) == 1
+        assert await redis.get(keys.PROVIDER) is None
 
 
-def _bar_json(price: float) -> str:
-    return json.dumps({"t": 1791561180, "o": price, "h": price, "l": price, "c": price, "n": 1})
+def _bar_json(price: float, src: str) -> str:
+    return json.dumps(
+        {"t": 1791561180, "o": price, "h": price, "l": price, "c": price, "n": 1, "src": src}
+    )
 
 
 class TestVolatilityAnnualisation:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import redis.asyncio as aioredis
@@ -258,3 +259,18 @@ async def test_the_bar_watermark_compares_stream_ids_numerically(db: Database) -
             )
 
     assert count == 2
+
+
+async def test_reapplying_the_alerts_migration_keeps_existing_transitions(db: Database) -> None:
+    """003 began with DROP TABLE alert_events; applied to a live database it erased them."""
+    migration = Path(__file__).parents[2] / "infra" / "migrations" / "003_alert_events.sql"
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO alert_events (symbol, seq, ts, old_regime, new_regime, "
+            "trigger_value, threshold_value) "
+            "VALUES ('EURUSD', 1, now(), 'normal', 'stressed', 3.4, 3.0)"
+        )
+        await conn.execute(migration.read_text(encoding="utf-8"))
+        kept = await conn.fetchval("SELECT count(*) FROM alert_events WHERE symbol = 'EURUSD'")
+
+    assert kept == 1

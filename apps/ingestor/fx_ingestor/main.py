@@ -218,13 +218,22 @@ class Ingestor:
                         attempt += 1
                     await asyncio.sleep(delay)
 
-    async def _adopt_provider(self) -> None:
-        """Never serve one provider's past as another's: replay prices, a real feed's
-        prices and their detector baselines do not belong in one series."""
-        previous = await self.redis.set(keys.PROVIDER, self.cfg.provider, get=True)
-        if previous is not None and previous != self.cfg.provider:
-            log.error("provider.switched", previous=previous, current=self.cfg.provider)
-            await self.pipeline.reset_history()
+    async def _rehydrate(self) -> None:
+        """This provider's own past only, and an invented one only for the simulator."""
+        switched = await self.pipeline.adopt_provider(self.cfg.provider)
+        if switched is not None and switched != ("unverified", 0):
+            log.error(
+                "provider.switched",
+                previous=switched[0],
+                current=self.cfg.provider,
+                parked_keys=switched[1],
+            )
+        # A market feed starts with no history and the API reports warming_up
+        # until real bars arrive: synthetic candles on a live chart would be
+        # indistinguishable from observations.
+        if self.cfg.provider == "replay":
+            await self.pipeline.backfill_history()
+        await self.pipeline.restore_detectors()
 
     def _since(self) -> str:
         return self._last_status.get("since", self._last_status.get("ts", ""))
@@ -272,12 +281,7 @@ class Ingestor:
                     # now - so if it is promoted mid-crisis it learns the crisis
                     # as "normal", reports NORMAL, and never emits the clear the
                     # stored 'stressed' row is waiting for.
-                    # Before anything else: a cold deployment has no past, and
-                    # an empty chart is indistinguishable from a broken one.
-                    # No-ops once history exists.
-                    await self._adopt_provider()
-                    await self.pipeline.backfill_history()
-                    await self.pipeline.restore_detectors()
+                    await self._rehydrate()
                     await self._run_as_leader()
                 if self.lease.lost.is_set() and not self._shutdown.is_set():
                     log.warning("leadership.lost_reentering_standby")
