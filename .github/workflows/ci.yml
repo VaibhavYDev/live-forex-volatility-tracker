@@ -3,6 +3,7 @@ name: CI
 on:
   push: {branches: [main]}
   pull_request:
+  workflow_dispatch:
   schedule:
     # The load suite asserts the O(1) property, and an O(n) regression passes
     # every functional test while degrading only after hours of uptime. Nightly
