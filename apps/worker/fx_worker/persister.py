@@ -73,6 +73,13 @@ FLUSH_SECONDS = Histogram("fx_flush_duration_seconds", "Time to commit one batch
 # How often to sweep for entries orphaned by a worker that died mid-run.
 CLAIM_SWEEP_INTERVAL_S = 30.0
 
+IDLE_POLL_S = 0.2
+
+
+def _fields(entries: list[list[Any]]) -> list[tuple[str, dict[str, str]]]:
+    """Raw stream entries, as a script returns them, in redis-py's parsed shape."""
+    return [(entry_id, dict(zip(kv[::2], kv[1::2], strict=True))) for entry_id, kv in entries]
+
 
 def _stream_order(entry_id: str) -> tuple[int, int]:
     """Stream ids are <ms>-<seq> with an unpadded seq, so as text 5-10 < 5-9."""
@@ -205,11 +212,12 @@ class Persister:
         self._unacked.clear()
         self._last_price.clear()
         total = 0
+        start = "0"
         while True:
             resp = await self._redis.xreadgroup(
                 keys.CONSUMER_GROUP,
                 self._consumer,
-                {keys.STREAM_TICKS: "0"},
+                {keys.STREAM_TICKS: start},
                 count=self._flush_max_rows,
             )
             entries = self._entries(resp)
@@ -219,12 +227,13 @@ class Persister:
                 self._ingest_entry(entry_id, fields)
                 self._unacked.append(entry_id)
             total += len(entries)
-            await self.flush()
+            start = entries[-1][0]
+        await self.flush()
         if total:
             log.info("recovery.own_pending_drained", entries=total)
         return total
 
-    async def claim_abandoned(self, min_idle_ms: int | None = None) -> int:
+    async def claim_abandoned(self, lease: LeaderLease, min_idle_ms: int | None = None) -> int:
         """Step 2: adopt entries whose consumer died.
 
         Without this, a permanently dead worker's in-flight entries sit in the PEL
@@ -235,25 +244,28 @@ class Persister:
         cursor = "0-0"
         total = 0
         while True:
-            result: Any = await self._redis.xautoclaim(
+            reply: Any = await lease.fenced(
+                "XAUTOCLAIM",
                 keys.STREAM_TICKS,
                 keys.CONSUMER_GROUP,
                 self._consumer,
-                min_idle_time=self._claim_idle_ms if min_idle_ms is None else min_idle_ms,
-                start_id=cursor,
-                count=self._flush_max_rows,
+                self._claim_idle_ms if min_idle_ms is None else min_idle_ms,
+                cursor,
+                "COUNT",
+                self._flush_max_rows,
             )
-            cursor, entries = result[0], result[1]
-            if not entries:
-                break
+            cursor, entries = reply[0], _fields(reply[1])
             for entry_id, fields in entries:
                 self._ingest_entry(entry_id, fields)
                 self._unacked.append(entry_id)
             total += len(entries)
             CLAIMED.inc(len(entries))
-            await self.flush()
-            if cursor in ("0-0", 0, "0"):
+            if cursor == "0-0":
                 break
+        # One transaction for the whole backlog. A predecessor paused past its lease
+        # may still commit the same entries, and the watermark keeps exactly one of
+        # the two only if each side commits a row's entries together.
+        await self.flush()
         if total:
             log.warning("recovery.claimed_from_dead_consumers", entries=total)
         return total
@@ -268,40 +280,52 @@ class Persister:
             out.extend(items)
         return out
 
-    async def run(self, lost: asyncio.Event) -> None:
+    async def _read_new(self, lease: LeaderLease) -> int:
+        # Fenced: once a successor holds the lease this raises instead of reading,
+        # so a paused holder cannot take entries the successor is also consuming.
+        reply: Any = await lease.fenced(
+            "XREADGROUP",
+            "GROUP",
+            keys.CONSUMER_GROUP,
+            self._consumer,
+            "COUNT",
+            self._flush_max_rows,
+            "STREAMS",
+            keys.STREAM_TICKS,
+            ">",
+        )
+        entries = _fields(reply[0][1]) if reply else []
+        for entry_id, fields in entries:
+            self._ingest_entry(entry_id, fields)
+            self._unacked.append(entry_id)
+        return len(entries)
+
+    async def run(self, lease: LeaderLease) -> None:
         await self.ensure_group()
         await self.drain_own_pending()
         # Under the lease, a pending entry owned by anyone else is a predecessor's.
         # It must land before newer ticks move its row's watermark past it.
-        await self.claim_abandoned(min_idle_ms=0)
+        await self.claim_abandoned(lease, min_idle_ms=0)
         log.info("persister.steady_state", consumer=self._consumer)
 
         claim_check = time.monotonic()
 
         while not self._stopping:
-            if lost.is_set():
+            if lease.lost.is_set():
                 # No flush: the successor replays these entries from our PEL.
                 return
-            resp = await self._redis.xreadgroup(
-                keys.CONSUMER_GROUP,
-                self._consumer,
-                {keys.STREAM_TICKS: ">"},
-                count=self._flush_max_rows,
-                block=1000,  # ms; returns empty on timeout so the timed flush still fires
-            )
-            for entry_id, fields in self._entries(resp):
-                self._ingest_entry(entry_id, fields)
-                self._unacked.append(entry_id)
-
+            read = await self._read_new(lease)
             if self._should_flush():
                 await self.flush()
+            if not read:
+                await asyncio.sleep(IDLE_POLL_S)  # a script cannot block on the stream
 
             # Periodically sweep for entries orphaned by a worker that died while
             # we were running, not just at startup.
             if time.monotonic() - claim_check > CLAIM_SWEEP_INTERVAL_S:
                 claim_check = time.monotonic()
                 with contextlib.suppress(aioredis.RedisError):
-                    await self.claim_abandoned()
+                    await self.claim_abandoned(lease)
                     await self._refresh_pending_metric()
 
         await self.flush()
@@ -328,7 +352,7 @@ async def run_forever(persister: Persister, lease: LeaderLease) -> None:
     while not persister._stopping:
         try:
             async with lease.hold():
-                await persister.run(lease.lost)
+                await persister.run(lease)
         except (aioredis.RedisError, OSError) as exc:
             log.warning("persister.retrying", error=str(exc), delay_s=round(backoff, 1))
             await asyncio.sleep(backoff)

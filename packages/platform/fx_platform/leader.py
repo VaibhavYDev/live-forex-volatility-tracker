@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
@@ -57,6 +58,15 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
 end
 return 0
+"""
+
+# The ownership check and the command run as one step, so a holder paused past
+# its TTL cannot act once a successor holds the key.
+_FENCED_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return redis.error_reply('NOTLEADER lease is held by another instance')
+end
+return redis.call(unpack(ARGV, 2))
 """
 
 
@@ -101,6 +111,10 @@ class LeaderLease:
             _RENEW_LUA, 1, self._key, self.instance_id, str(self._ttl_ms)
         )
         return bool(result)
+
+    async def fenced(self, *command: str | int) -> Any:
+        """Run a Redis command only while holding the lease; ResponseError if not."""
+        return await self._redis.eval(_FENCED_LUA, 1, self._key, self.instance_id, *command)
 
     async def _release(self) -> None:
         with contextlib.suppress(aioredis.RedisError):

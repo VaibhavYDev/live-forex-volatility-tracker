@@ -223,7 +223,9 @@ class TestPersisterRecovery:
         assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 15
 
         survivor = Persister(redis, db, consumer_name="survivor", claim_idle_ms=0)  # type: ignore[arg-type]
-        claimed = await survivor.claim_abandoned()
+        lease = LeaderLease(redis, keys.PERSISTER_LEASE)
+        await redis.set(keys.PERSISTER_LEASE, lease.instance_id)
+        claimed = await survivor.claim_abandoned(lease)
 
         assert claimed == 15
         assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 0
@@ -320,7 +322,8 @@ class TestPersisterRecovery:
         await task
         # The periodic sweep, once anything left behind passes claim_idle_ms.
         standby._claim_idle_ms = 0
-        await standby.claim_abandoned()
+        await redis.set(keys.PERSISTER_LEASE, lease.instance_id)
+        await standby.claim_abandoned(lease)
 
         assert sum(b.tick_count for b in db.rows.values()) == 10
         assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 0
@@ -369,13 +372,64 @@ class TestPersisterRecovery:
 
         await redis.set(keys.PERSISTER_LEASE, "successor", px=60_000)
         await asyncio.wait_for(lease.lost.wait(), timeout=2)
-        await asyncio.sleep(1.5)  # past one blocking read, where the loop checks the loss
+        await asyncio.sleep(1.5)  # past the loop's next lease check
 
         assert not db.rows
         assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 10
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    async def test_a_holder_paused_past_its_lease_neither_loses_nor_doubles_ticks(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """Unfenced, this persisted 12 of 10 ticks: five counted twice, three dropped."""
+        await self._seed(redis, 10)
+        db = StubDatabase()
+        paused = Persister(redis, db, consumer_name="paused", flush_max_rows=5)  # type: ignore[arg-type]
+        successor = Persister(redis, db, consumer_name="successor", flush_max_rows=3)  # type: ignore[arg-type]
+        paused_lease = LeaderLease(redis, keys.PERSISTER_LEASE)
+        successor_lease = LeaderLease(redis, keys.PERSISTER_LEASE)
+        await paused.ensure_group()
+        await redis.set(keys.PERSISTER_LEASE, paused_lease.instance_id)
+        assert await paused._read_new(paused_lease) == 5
+
+        # The paused holder's TTL runs out and the successor is elected.
+        await redis.set(keys.PERSISTER_LEASE, successor_lease.instance_id)
+        await successor.drain_own_pending()
+        assert await successor.claim_abandoned(successor_lease, min_idle_ms=0) == 5
+        assert await successor._read_new(successor_lease) == 3
+
+        # The paused holder resumes, unaware: it may commit what it already held,
+        # but it can no longer take new entries.
+        with pytest.raises(aioredis.ResponseError, match="NOTLEADER"):
+            await paused._read_new(paused_lease)
+        await paused.flush()
+
+        await successor.flush()
+        assert await successor._read_new(successor_lease) == 2
+        await successor.flush()
+
+        assert sum(b.tick_count for b in db.rows.values()) == 10
+        assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 0
+
+    async def test_a_takeover_commits_the_whole_backlog_in_one_transaction(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """Committed page by page, a paused predecessor's commit could land in between."""
+        await self._seed(redis, 10)
+        db = StubDatabase()
+        dead = Persister(redis, db, consumer_name="dead")  # type: ignore[arg-type]
+        await dead.ensure_group()
+        await redis.xreadgroup(keys.CONSUMER_GROUP, "dead", {keys.STREAM_TICKS: ">"}, count=10)
+
+        successor = Persister(redis, db, consumer_name="successor", flush_max_rows=3)  # type: ignore[arg-type]
+        lease = LeaderLease(redis, keys.PERSISTER_LEASE)
+        await redis.set(keys.PERSISTER_LEASE, lease.instance_id)
+
+        assert await successor.claim_abandoned(lease, min_idle_ms=0) == 10
+        assert db.calls == 1
+        assert sum(b.tick_count for b in db.rows.values()) == 10
 
     async def test_the_watermark_is_the_numerically_highest_stream_id(
         self, redis: aioredis.Redis
