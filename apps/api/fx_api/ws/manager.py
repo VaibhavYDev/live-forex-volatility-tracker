@@ -112,13 +112,21 @@ class ConnectionManager:
     # --------------------------------------------------------------- routing
     async def _router(self) -> None:
         assert self._pubsub is not None
-        async for message in self._pubsub.listen():
-            if message is None or message.get("type") not in ("message", "pmessage"):
-                continue
+        while True:
             try:
-                self._dispatch(str(message["channel"]), str(message["data"]))
-            except Exception:
-                log.exception("fanout.dispatch_failed", channel=message.get("channel"))
+                async for message in self._pubsub.listen():
+                    if message is None or message.get("type") not in ("message", "pmessage"):
+                        continue
+                    try:
+                        self._dispatch(str(message["channel"]), str(message["data"]))
+                    except Exception:
+                        log.exception("fanout.dispatch_failed", channel=message.get("channel"))
+                return
+            except (aioredis.RedisError, OSError) as exc:
+                # An outage longer than redis-py's own retries ends listen(). Without
+                # this the task dies unobserved and every client here gets no data.
+                log.warning("fanout.disconnected", error=str(exc))
+                await asyncio.sleep(1.0)
 
     def _dispatch(self, channel: str, raw: str) -> None:
         payload = json.loads(raw)

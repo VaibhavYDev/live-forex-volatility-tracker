@@ -7,8 +7,13 @@ without a test is a wish.
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 
+import pytest
+import redis
 from fx_api.ws.conflator import ClientSession
+from fx_api.ws.manager import ConnectionManager
+from fx_core import keys
 
 
 def _session() -> ClientSession:
@@ -111,3 +116,34 @@ class TestSaturationDetection:
         time.sleep(0.06)
         s.drain()
         assert not s.note_saturation(deadline_s=0.05)
+
+
+class _FlakyPubSub:
+    """listen() fails once, as it does when Redis outlasts redis-py's own retries."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def listen(self) -> AsyncIterator[dict[str, str]]:
+        self.calls += 1
+        if self.calls == 1:
+            raise redis.ConnectionError("Redis restarted")
+        yield {"type": "pmessage", "channel": keys.channel_tick("EURUSD"), "data": '{"m": 1.08}'}
+
+
+class TestFanoutRecovery:
+    async def test_the_router_resumes_after_a_redis_outage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def no_sleep(_: float) -> None:
+            return None
+
+        monkeypatch.setattr("fx_api.ws.manager.asyncio.sleep", no_sleep)
+        manager = ConnectionManager(redis=None)  # type: ignore[arg-type]
+        manager._pubsub = _FlakyPubSub()  # type: ignore[assignment]
+        session = _session()
+        manager.register(session)
+
+        await manager._router()
+
+        assert [frame["m"] for frame in session.drain()] == [1.08]

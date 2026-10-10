@@ -43,7 +43,14 @@ export type ServerFrame =
       exit_z: number;
     }
   | ({ type: "alert" } & Transition)
-  | { type: "status"; state: FeedState; detail?: string; ts: string }
+  | {
+      type: "status";
+      state: FeedState;
+      detail?: string;
+      ts: string;
+      since?: string;
+      provider?: string;
+    }
   | { type: "pong"; ts: string }
   | { type: "error"; message: string };
 

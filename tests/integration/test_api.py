@@ -13,6 +13,7 @@ Nothing here is mocked: the point is the wiring.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Iterator
@@ -24,8 +25,11 @@ from fastapi.testclient import TestClient
 from fx_api.config import ApiSettings
 from fx_api.main import create_app
 from fx_api.routers.market import _Cache, _compare_cache
+from fx_api.ws.manager import ConnectionManager
 from fx_core import keys
 from starlette.websockets import WebSocketDisconnect
+
+from tests.conftest import REDIS_URL
 
 pytestmark = pytest.mark.integration
 
@@ -63,7 +67,7 @@ def seed_feed(redis: Any, state: str = "healthy", age_s: float = 0.0) -> None:
 @pytest.fixture
 def client(redis_sync: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """The real app, real lifespan, real Redis, tickets off unless a test says so."""
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
+    monkeypatch.setenv("REDIS_URL", REDIS_URL)
     monkeypatch.setenv(TICKET_REQUIRED_ENV, "0")
     monkeypatch.setenv("FX_RATE_LIMIT_PER_MIN", "5")
     monkeypatch.setenv("FX_TICKET_LIMIT_PER_MIN", "3")
@@ -76,7 +80,7 @@ def client(redis_sync: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
 
 @pytest.fixture
 def secured(redis_sync: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
+    monkeypatch.setenv("REDIS_URL", REDIS_URL)
     monkeypatch.setenv(TICKET_REQUIRED_ENV, "1")
     monkeypatch.setenv("FX_TICKET_LIMIT_PER_MIN", "50")
     _compare_cache.clear()
@@ -117,7 +121,9 @@ class TestHealth:
     def test_no_heartbeat_at_all_is_not_reported_as_healthy(self, client: TestClient) -> None:
         # Absence of the key means the ingestor's TTL expired. That is an answer,
         # and it must not be optimistically rounded to "fine".
-        assert client.get("/readyz").json()["feed_state"] == "unknown"
+        r = client.get("/readyz")
+        assert r.json()["feed_state"] == "unknown"
+        assert r.status_code == 503
 
     def test_metrics_are_exported(self, client: TestClient) -> None:
         r = client.get("/metrics")
@@ -299,6 +305,38 @@ class TestWebSocketProtocol:
         # erroring.
         assert "zhist" in data
         assert data["regime"]["regime"] == "unknown"
+
+    @pytest.mark.parametrize(
+        ("channel", "payload", "kind"),
+        [
+            (keys.channel_tick(SYMBOL), {"s": SYMBOL, "m": 1.0851}, "tick"),
+            (keys.channel_alert(SYMBOL), {"s": SYMBOL, "seq": 7}, "alert"),
+        ],
+    )
+    def test_a_delta_during_the_snapshot_arrives_after_it(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        channel: str,
+        payload: dict[str, Any],
+        kind: str,
+    ) -> None:
+        """Sent first, the browser would overwrite it with the older snapshot."""
+        real = ConnectionManager.snapshot
+
+        async def racing(self: ConnectionManager, symbols: list[str], bars: int = 240) -> Any:
+            snap = await real(self, symbols, bars=bars)
+            self._dispatch(channel, json.dumps(payload))
+            await asyncio.sleep(0.2)  # the writer's chance to jump the queue
+            return snap
+
+        monkeypatch.setattr(ConnectionManager, "snapshot", racing)
+        with client.websocket_connect("/ws/stream") as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"op": "subscribe", "symbols": [SYMBOL], "bars": 0})
+            order = [ws.receive_json()["type"], ws.receive_json()["type"]]
+
+        assert order == ["snapshot", kind]
 
     def test_symbols_are_normalised_server_side(self, client: TestClient) -> None:
         # ["eurusd", "EURUSD"] would otherwise occupy two subscription slots and

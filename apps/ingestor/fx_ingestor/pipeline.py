@@ -362,9 +362,12 @@ class IngestPipeline:
             symbol=st.symbol,
             estimator=Estimator.EWMA,
             window_s=st.window.window_seconds,
-            sigma=st.ewma.sigma,
+            # Per-tick variance times the bar's tick count is the bar's variance, which
+            # the bar basis annualises. Annualising per tick as if ticks were one second
+            # apart understated sigma by the square root of the tick rate.
+            sigma=st.ewma.sigma * math.sqrt(sealed.tick_count),
             sample_count=st.ewma.n,
-            bar_seconds=1,  # EWMA here is per-tick; the basis is stated, not implied
+            bar_seconds=self._bucket_seconds,
             zscore=st.detector.last_zscore,
         )
         payload = {

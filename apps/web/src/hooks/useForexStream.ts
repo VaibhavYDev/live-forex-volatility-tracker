@@ -153,9 +153,11 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
             break;
           }
 
-          case "status":
-            store.setFeed({ state: frame.state, detail: frame.detail, ts: frame.ts });
+          case "status": {
+            const { type: _, ...feed } = frame;
+            store.setFeed(feed);
             break;
+          }
 
           case "hello":
             store.setFeed(frame.feed);

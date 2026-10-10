@@ -57,6 +57,8 @@ function Probe() {
       <dd data-testid="alerts">{alerts.length}</dd>
       <dd data-testid="zhist">{z.length}</dd>
       <dd data-testid="feed">{feed.state}</dd>
+      <dd data-testid="provider">{feed.provider ?? "—"}</dd>
+      <dd data-testid="since">{feed.since ?? "—"}</dd>
       <dd data-testid="conn">{conn.state}</dd>
     </dl>
   );
@@ -188,6 +190,16 @@ describe("frame handling", () => {
 
     frame({ type: "status", state: "degraded", detail: "upstream reconnecting", ts: at(5) });
     expect(read("feed")).toBe("degraded");
+  });
+
+  it("keeps the provider and the state-change time from status frames", () => {
+    // The 5s heartbeat arrives as a status frame. Dropping these fields there
+    // lost the replay label and "degraded for 12 minutes" within five seconds.
+    mount();
+    frame({ type: "status", state: "healthy", ts: at(5), since: at(0), provider: "replay" });
+
+    expect(screen.getByTestId("provider")).toHaveTextContent("replay");
+    expect(screen.getByTestId("since")).toHaveTextContent(at(0));
   });
 
   it("ignores frames it does not understand", () => {

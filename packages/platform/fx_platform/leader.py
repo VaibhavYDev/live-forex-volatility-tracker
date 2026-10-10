@@ -38,7 +38,6 @@ from collections.abc import AsyncIterator
 
 import redis.asyncio as aioredis
 import structlog
-from fx_core.keys import LEADER_LEASE
 
 log = structlog.get_logger(__name__)
 
@@ -65,9 +64,9 @@ class LeaderLease:
     def __init__(
         self,
         redis: aioredis.Redis,
+        key: str,
         ttl_ms: int = 10_000,
         renew_ms: int = 3_000,
-        key: str = LEADER_LEASE,
     ) -> None:
         if renew_ms >= ttl_ms / 2:
             # Renewing at >= TTL/2 gives you one shot before expiry. One dropped

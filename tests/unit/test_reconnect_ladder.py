@@ -33,13 +33,12 @@ citizen of someone else's infrastructure". On this path we were not.
 from __future__ import annotations
 
 import asyncio
+import random
 
 import pytest
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import MIN_HEALTHY_SESSION_S, Ingestor
 from fx_ingestor.supervisor import BreakerState
-
-pytestmark = pytest.mark.anyio
 
 
 class FakeClock:
@@ -59,6 +58,7 @@ def build(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> tuple[Ingestor, 
     """An Ingestor with Redis, the provider and sleeping all replaced."""
     cfg = IngestorSettings(FX_PROVIDER="replay", FX_SYMBOLS="EURUSD")
     monkeypatch.setattr("fx_ingestor.main.make_redis", lambda _url: None)
+    monkeypatch.setattr("fx_ingestor.supervisor._DEFAULT_RNG", random.Random(0))
     ing = Ingestor(cfg)
     ing._monotonic = clock
 
@@ -75,11 +75,6 @@ def build(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> tuple[Ingestor, 
 
     monkeypatch.setattr(ing, "_publish_status", noop_status)
     return ing, slept
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
 
 
 async def _drive(ing: Ingestor, session_s: float, rounds: int, clock: FakeClock) -> None:
@@ -101,6 +96,9 @@ async def test_a_flapping_provider_backs_off(monkeypatch: pytest.MonkeyPatch) ->
     """The regression. Sessions that die instantly must escalate the ladder."""
     clock = FakeClock()
     ing, slept = build(monkeypatch, clock)
+    # An open breaker adds 1s waits of its own, which would satisfy the sum below
+    # without any escalation. This test is about the ladder alone.
+    ing.breaker.fail_threshold = 1_000
 
     await _drive(ing, session_s=0.01, rounds=6, clock=clock)
 
@@ -138,6 +136,9 @@ async def test_the_breaker_eventually_opens_on_a_connect_hangup_loop(
     clock = FakeClock()
     ing, _ = build(monkeypatch, clock)
     ing.breaker.fail_threshold = 3
+    # The reset window runs on the real clock, which FakeClock cannot advance;
+    # without this each reopen waits 30 real seconds and the test times out.
+    ing.breaker.reset_after_s = 0.0
 
     await _drive(ing, session_s=0.01, rounds=8, clock=clock)
 

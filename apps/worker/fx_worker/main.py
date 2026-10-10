@@ -7,7 +7,8 @@ import contextlib
 import signal
 
 import structlog
-from fx_platform import close_redis, configure_logging, make_redis, serve_metrics
+from fx_core import keys
+from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
 
 from fx_worker.alerts import AlertPersister
 from fx_worker.alerts import run_forever as run_alerts_forever
@@ -55,9 +56,15 @@ async def main() -> None:
         redis, db, consumer_name=cfg.consumer_name, claim_idle_ms=cfg.claim_idle_ms
     )
 
+    lease = LeaderLease(redis, keys.PERSISTER_LEASE)
+    bars: asyncio.Task[None] | None = None
+
     def stop_all() -> None:
         persister.stop()
         alert_persister.stop()
+        # A standby is parked in lease.hold() and would never see the flag.
+        if bars is not None and not lease.is_leader:
+            bars.cancel()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -72,13 +79,9 @@ async def main() -> None:
         # looks healthy in a dashboard while silently persisting only half the
         # data - the failure mode that takes a week to notice.
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(run_forever(persister), name="bar-persister")
+            bars = tasks.create_task(run_forever(persister, lease), name="bar-persister")
             tasks.create_task(run_alerts_forever(alert_persister), name="alert-persister")
     finally:
-        # Flush before dying so a graceful restart loses nothing at all - the
-        # PEL would have covered us, but only after the idle timeout.
-        with contextlib.suppress(Exception):
-            await persister.flush()
         await db.close()
         await close_redis(redis)
         log.info("worker.stopped")

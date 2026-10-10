@@ -67,7 +67,9 @@ async def issue_ticket(request: Request) -> JSONResponse:
     return JSONResponse({"ticket": token, "expires_in": settings.ws_ticket_ttl_s})
 
 
-async def _writer(ws: WebSocket, session: ClientSession, deadline_s: float) -> None:
+async def _writer(
+    ws: WebSocket, session: ClientSession, deadline_s: float, send_lock: asyncio.Lock
+) -> None:
     """Drain the conflating map. The ONLY place that writes to this socket."""
     try:
         while not session.closed:
@@ -87,8 +89,9 @@ async def _writer(ws: WebSocket, session: ClientSession, deadline_s: float) -> N
                 session.closed = True
                 return
 
-            for frame in session.drain():
-                await ws.send_json(frame)
+            async with send_lock:
+                for frame in session.drain():
+                    await ws.send_json(frame)
     except (WebSocketDisconnect, RuntimeError):
         session.closed = True
 
@@ -108,20 +111,24 @@ async def stream(ws: WebSocket, ticket: str = Query(default="")) -> None:
     await ws.accept()
     session = ClientSession(client_id=str(uuid.uuid4()))
     manager.register(session)
+    # Held across the hello and each snapshot: a delta sent ahead of its snapshot
+    # would be overwritten in the browser by the older snapshot.
+    send_lock = asyncio.Lock()
     writer = asyncio.create_task(
-        _writer(ws, session, settings.ws_slow_client_deadline_s), name="ws-writer"
+        _writer(ws, session, settings.ws_slow_client_deadline_s, send_lock), name="ws-writer"
     )
 
     try:
-        await ws.send_json(
-            {
-                "type": "hello",
-                "protocol": PROTOCOL_VERSION,
-                "server_time": datetime.now(UTC).isoformat(),
-                "max_symbols": MAX_SYMBOLS_PER_CLIENT,
-                "feed": manager.feed_status,
-            }
-        )
+        async with send_lock:
+            await ws.send_json(
+                {
+                    "type": "hello",
+                    "protocol": PROTOCOL_VERSION,
+                    "server_time": datetime.now(UTC).isoformat(),
+                    "max_symbols": MAX_SYMBOLS_PER_CLIENT,
+                    "feed": manager.feed_status,
+                }
+            )
 
         while True:
             raw = await ws.receive_json()
@@ -132,13 +139,14 @@ async def stream(ws: WebSocket, ticket: str = Query(default="")) -> None:
                 if len(session.symbols | set(msg.symbols)) > MAX_SYMBOLS_PER_CLIENT:
                     await ws.close(CloseCode.TOO_MANY_SYMBOLS, "subscription limit")
                     break
-                session.subscribe(msg.symbols)
-                # Snapshot THEN delta. The writer task is already running, so any
-                # deltas that arrive during this await are queued in `pending`
-                # and delivered right after - no gap, and no double-apply,
-                # because conflation keeps only the newest value per key anyway.
-                snap = await manager.snapshot(msg.symbols, bars=msg.bars)
-                await ws.send_json({"type": "snapshot", "data": snap})
+                # Snapshot THEN delta. Deltas that arrive during this await are
+                # queued in `pending` and delivered right after - no gap, and no
+                # double-apply, because conflation keeps only the newest value per
+                # key anyway.
+                async with send_lock:
+                    session.subscribe(msg.symbols)
+                    snap = await manager.snapshot(msg.symbols, bars=msg.bars)
+                    await ws.send_json({"type": "snapshot", "data": snap})
                 log.info("ws.subscribed", client=session.client_id, symbols=msg.symbols)
 
             elif op == "unsubscribe":

@@ -82,7 +82,6 @@ def test_conflation_bounds_memory_under_a_firehose() -> None:
     assert session.conflated == published - len(SYMBOLS)
 
 
-@pytest.mark.anyio
 async def test_replay_provider_sustains_target_rate() -> None:
     """The replay feed must actually deliver what it promises, or load numbers lie."""
     target = 2_000.0
@@ -106,7 +105,6 @@ async def test_replay_provider_sustains_target_rate() -> None:
     assert all(t.bid < t.ask for t in ticks), "replay produced a crossed book"
 
 
-@pytest.mark.anyio
 async def test_broadcast_latency_across_many_clients() -> None:
     """Fan-out must stay O(clients) with a small constant — no per-client blocking."""
     clients = [ClientSession(client_id=f"c{i}") for i in range(500)]

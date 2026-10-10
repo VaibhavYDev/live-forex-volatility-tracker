@@ -102,7 +102,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q --strict-markers -m \"not load\""  # benchmarks are opt-in: uv run pytest tests/load -m load -s
+addopts = "-q --strict-markers -p no:anyio -m \"not load\""  # benchmarks are opt-in: uv run pytest tests/load -m load -s
 markers = [
     "integration: requires real Redis/Postgres (testcontainers)",
     "chaos: fault-injection tests",

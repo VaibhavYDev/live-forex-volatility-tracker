@@ -36,14 +36,7 @@ from fx_core import keys
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import Ingestor
 
-pytestmark = pytest.mark.anyio
-
 STALENESS_THRESHOLD_S = 60.0  # /readyz feed_stale_after_s, and the banner's
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
 
 
 class FakeRedis:

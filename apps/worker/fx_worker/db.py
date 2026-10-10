@@ -68,7 +68,9 @@ ON CONFLICT (symbol, bucket) DO UPDATE SET
     -- Backfilled data never silently overwrites streamed data's provenance.
     source         = CASE WHEN bars_1m.source = 'stream' THEN bars_1m.source
                           ELSE EXCLUDED.source END
-WHERE EXCLUDED.last_stream_id > bars_1m.last_stream_id
+-- Numerically: the sequence part is unpadded, so as text '5-10' < '5-9'.
+WHERE string_to_array(EXCLUDED.last_stream_id, '-')::bigint[]
+    > string_to_array(bars_1m.last_stream_id, '-')::bigint[]
 """
 
 

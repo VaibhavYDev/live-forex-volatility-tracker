@@ -61,7 +61,9 @@ async def readyz(response: Response) -> dict[str, object]:
         age = (datetime.now(UTC) - with_tz).total_seconds()
         checks["feed_age_s"] = round(age, 1)
 
-    ready = checks["redis"] == "ok" and feed.get("state") in ("healthy", "unknown")
+    # "unknown" means the status key expired: no ingestor heartbeat for its TTL,
+    # which is staler than the threshold below, not a reason to take traffic.
+    ready = checks["redis"] == "ok" and feed.get("state") == "healthy"
     if age is not None and age > settings.feed_stale_after_s:
         ready = False
         checks["feed_state"] = "stale"

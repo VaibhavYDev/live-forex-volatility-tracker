@@ -53,6 +53,7 @@ import structlog
 from fx_core import keys
 from fx_core.models import Bar
 from fx_core.volatility.buckets import BucketAccumulator, floor_to_bucket
+from fx_platform import LeaderLease
 from prometheus_client import Counter, Gauge, Histogram
 
 from fx_worker.db import Database
@@ -71,6 +72,12 @@ FLUSH_SECONDS = Histogram("fx_flush_duration_seconds", "Time to commit one batch
 
 # How often to sweep for entries orphaned by a worker that died mid-run.
 CLAIM_SWEEP_INTERVAL_S = 30.0
+
+
+def _stream_order(entry_id: str) -> tuple[int, int]:
+    """Stream ids are <ms>-<seq> with an unpadded seq, so as text 5-10 < 5-9."""
+    ms, seq = entry_id.split("-")
+    return int(ms), int(seq)
 
 
 class Persister:
@@ -138,10 +145,8 @@ class Persister:
 
         acc.add(mid, self._last_price.get(symbol))
         self._last_price[symbol] = mid
-        # Redis stream ids sort lexicographically the same way they sort
-        # chronologically (zero-padded ms-seq), so max() is the watermark.
         prev = self._max_id.get(key)
-        if prev is None or entry_id > prev:
+        if prev is None or _stream_order(entry_id) > _stream_order(prev):
             self._max_id[key] = entry_id
         TICKS_CONSUMED.inc()
 
@@ -182,10 +187,10 @@ class Persister:
         ROWS_WRITTEN.inc(written)
         log.debug("flush.ok", bars=written, entries=len(self._unacked))
 
-        # Keep only the still-open bucket per symbol; sealed ones are durable now.
-        now_bucket = int(floor_to_bucket(datetime.now(UTC), self._bucket_seconds).timestamp())
-        self._accs = {k: v for k, v in self._accs.items() if k[1] >= now_bucket}
-        self._max_id = {k: v for k, v in self._max_id.items() if k in self._accs}
+        # The upsert adds the additive columns, so even a still-open bucket must
+        # start empty: the next flush carries only ticks that arrive after this one.
+        self._accs.clear()
+        self._max_id.clear()
         self._unacked.clear()
         self._last_flush = time.monotonic()
         return written
@@ -193,6 +198,12 @@ class Persister:
     # ---------------------------------------------------------------- recovery
     async def drain_own_pending(self) -> int:
         """Step 1: entries this consumer already holds, from a previous life."""
+        # The PEL replays every unacked entry, including any still in memory from
+        # a failed flush. Folding them in twice would double count them.
+        self._accs.clear()
+        self._max_id.clear()
+        self._unacked.clear()
+        self._last_price.clear()
         total = 0
         while True:
             resp = await self._redis.xreadgroup(
@@ -213,7 +224,7 @@ class Persister:
             log.info("recovery.own_pending_drained", entries=total)
         return total
 
-    async def claim_abandoned(self) -> int:
+    async def claim_abandoned(self, min_idle_ms: int | None = None) -> int:
         """Step 2: adopt entries whose consumer died.
 
         Without this, a permanently dead worker's in-flight entries sit in the PEL
@@ -228,7 +239,7 @@ class Persister:
                 keys.STREAM_TICKS,
                 keys.CONSUMER_GROUP,
                 self._consumer,
-                min_idle_time=self._claim_idle_ms,
+                min_idle_time=self._claim_idle_ms if min_idle_ms is None else min_idle_ms,
                 start_id=cursor,
                 count=self._flush_max_rows,
             )
@@ -257,15 +268,20 @@ class Persister:
             out.extend(items)
         return out
 
-    async def run(self) -> None:
+    async def run(self, lost: asyncio.Event) -> None:
         await self.ensure_group()
         await self.drain_own_pending()
-        await self.claim_abandoned()
+        # Under the lease, a pending entry owned by anyone else is a predecessor's.
+        # It must land before newer ticks move its row's watermark past it.
+        await self.claim_abandoned(min_idle_ms=0)
         log.info("persister.steady_state", consumer=self._consumer)
 
         claim_check = time.monotonic()
 
         while not self._stopping:
+            if lost.is_set():
+                # No flush: the successor replays these entries from our PEL.
+                return
             resp = await self._redis.xreadgroup(
                 keys.CONSUMER_GROUP,
                 self._consumer,
@@ -298,18 +314,21 @@ class Persister:
         self._stopping = True
 
 
-async def run_forever(persister: Persister) -> None:
-    """Restart the consume loop on transient infrastructure errors.
+async def run_forever(persister: Persister, lease: LeaderLease) -> None:
+    """Consume only while holding the lease; restart on transient infrastructure errors.
+
+    Two consumers committing the same row out of stream order would skip ticks at
+    the watermark, so a second worker waits as a standby instead of consuming.
 
     Deliberately does NOT catch everything: a programming error should crash the
     process so the orchestrator restarts it cleanly and the failure is visible,
     rather than being swallowed into a loop that logs forever and ingests nothing.
     """
     backoff = 1.0
-    while True:
+    while not persister._stopping:
         try:
-            await persister.run()
-            return
+            async with lease.hold():
+                await persister.run(lease.lost)
         except (aioredis.RedisError, OSError) as exc:
             log.warning("persister.retrying", error=str(exc), delay_s=round(backoff, 1))
             await asyncio.sleep(backoff)
