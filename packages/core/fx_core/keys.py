@@ -80,15 +80,19 @@ DURABLE_KEYS: Final = frozenset(
 )
 
 # --- disposable: always TTL'd ------------------------------------------------
-TTL_QUOTE_S: Final = 300
+# Quotes, bars and z-scores outlive a closed market (the FX weekend plus a
+# holiday), so a closed market shows its last real observations, dated, and not
+# an empty screen. Nothing refreshes them meanwhile; their timestamps say how old.
+OUTLIVES_MARKET_CLOSE_S: Final = 4 * 86_400
+TTL_QUOTE_S: Final = OUTLIVES_MARKET_CLOSE_S
 TTL_BAR_S: Final = 3600
 TTL_VOL_S: Final = 300
-TTL_HISTORY_S: Final = 86_400
+TTL_HISTORY_S: Final = OUTLIVES_MARKET_CLOSE_S
 
 # The z-score series backing the volatility pane. Disposable by construction:
 # every point is recomputable from bars_1m and the detector, so losing it to an
 # eviction costs a redraw, not data.
-TTL_ZHIST_S: Final = 86_400
+TTL_ZHIST_S: Final = OUTLIVES_MARKET_CLOSE_S
 ZHIST_MAXLEN: Final = 1_440  # 24h of one-minute bars, same bound as `history`
 
 # Feed health, refreshed by the ingestor as a heartbeat.

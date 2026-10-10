@@ -74,25 +74,6 @@ Asserted by `test_broadcast_latency_across_many_clients`.
 
 ---
 
-## 4. Replay provider throughput
-
-| | ticks/s |
-|---|---|
-| target | 2,000 |
-| achieved | 840 |
-
-Honest note: the shortfall is `asyncio.sleep()` granularity, not the pipeline — the
-event loop cannot reliably sleep for 500 µs. For load tests that need a genuine
-firehose, use `speed=100` (which scales the simulated clock) rather than raising
-`ticks_per_sec`, or drop the inter-tick sleep entirely in a burst-mode fixture.
-
-Stating this rather than quietly reporting "2,000/s" matters: a benchmark you cannot
-reproduce is worse than no benchmark.
-
-Asserted by `test_replay_provider_sustains_target_rate`.
-
----
-
 ## What is not benchmarked yet
 
 - **End-to-end p99 latency, provider timestamp → browser paint.** The histogram

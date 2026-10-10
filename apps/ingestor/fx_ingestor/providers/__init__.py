@@ -3,7 +3,8 @@
 Adding a data source is: write the adapter, add one line to ``_REGISTRY``, done.
 Nothing else in the codebase needs to know it exists. That is the concrete answer
 to "how would a new contributor extend this?" - and it is the question GSoC
-mentors actually weight.
+mentors actually weight. Every entry is a real market feed: nothing here may
+generate prices.
 """
 
 from __future__ import annotations
@@ -16,22 +17,22 @@ from fx_ingestor.providers.base import (
     ProviderAuthError,
     ProviderError,
 )
-from fx_ingestor.providers.replay import ReplayProvider
 from fx_ingestor.providers.tiingo import TiingoProvider
 
 __all__ = [
+    "PROVIDERS",
     "MarketDataProvider",
     "ProviderAuthError",
     "ProviderError",
-    "ReplayProvider",
     "TiingoProvider",
     "build_provider",
 ]
 
 _REGISTRY: dict[str, Callable[..., MarketDataProvider]] = {
-    "replay": ReplayProvider,
     "tiingo": TiingoProvider,
 }
+
+PROVIDERS = frozenset(_REGISTRY)
 
 
 def build_provider(name: str, symbols: Sequence[str], **kwargs: Any) -> MarketDataProvider:

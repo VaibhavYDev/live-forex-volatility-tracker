@@ -32,33 +32,28 @@ measured, it says so.
 ```bash
 git clone https://github.com/<you>/live-forex-volatility-tracker
 cd live-forex-volatility-tracker
-cp .env.example .env
+cp .env.example .env   # then set FX_PROVIDER_TOKEN (a Tiingo API token)
 docker compose up -d
 ```
 
 Then open <http://localhost:5173>.
 
-Not set up to run it? The same dashboard is served at
-**<https://vaibhavydev.github.io/live-forex-volatility-tracker/>** — no install,
-nothing to start. It is a static build carrying a session that
-`scripts/build_demo_dataset.py` produced by running the real `fx_core` engine,
-so every σ, z-score and regime transition on it came out of the code in this
-repository rather than out of JavaScript imitating it.
-
-That is the whole demo path, and it needs no API key: the default provider is
-`replay`, a deterministic synthetic feed whose per-minute realised volatility is
-exactly what it claims. Set `FX_PROVIDER=tiingo` and `FX_PROVIDER_TOKEN=...` for
-a live feed. A live chart starts empty and fills only with real quotes; switching
-provider sets the previous one's history and detector state aside in Redis under
-`archive:<provider>:` (cached history keeps its 24-hour expiry) and restores them
-if you switch back.
+Only real market data is shown. There is no simulated feed and no fallback to
+one: without `FX_PROVIDER_TOKEN` the ingestor exits and the dashboard reports no
+feed. On start the chart loads the provider's own history where the account is
+entitled to it, tagged `backfill`; otherwise it says it is waiting for history
+until real bars arrive. The status reads **Live** only once a real quote has
+arrived and the heartbeat is fresh, and a quote the market has stopped updating
+is shown with the time it was quoted. Switching provider sets the previous one's
+history and detector state aside in Redis under `archive:<provider>:` rather
+than mixing or deleting it.
 
 Every address below is on **your own machine** and answers only while the stack
 above is running.
 
 | Surface | Address (after `compose up`) |
 |---|---|
-| Dashboard | <http://localhost:5173> · [hosted copy](https://vaibhavydev.github.io/live-forex-volatility-tracker/) |
+| Dashboard | <http://localhost:5173> |
 | REST + OpenAPI | <http://localhost:8000/docs> |
 | Live stream | `ws://localhost:8000/ws/stream` |
 | Readiness | <http://localhost:8000/readyz> |
@@ -152,7 +147,7 @@ Local development, the four test tiers and the contribution conventions are in
 
 ```mermaid
 flowchart TB
-    P["Upstream feed<br/>Tiingo WS or deterministic replay"]
+    P["Upstream feed<br/>Tiingo WS"]
 
     subgraph ING["Ingestor · N replicas, exactly 1 leader"]
         LEASE["Leader lease<br/>SET NX PX + Lua CAS renew"]
@@ -405,7 +400,6 @@ the assertions check.
 | Conflation under a firehose | 200,000 updates → **5 entries** held | memory bounded by *subscribed symbols*, not message rate; a naive queue holds 200,000 |
 | Publish throughput | **1,506 k/s** | |
 | Fan-out to 500 clients, 450 of them not reading | p50 **312 µs** · p99 **533 µs** | no client blocks the loop; in the naive `await ws.send_json()` design this figure is whatever the slowest client's network decides |
-| Replay provider | **840/s** against a 2,000/s target | shortfall is `asyncio.sleep()` granularity, not the pipeline — stated rather than quietly reported as 2,000 |
 
 Run-to-run variance on a shared 1-vCPU container is real: the O(1) ratio has been
 observed between **0.98× and 1.16×** across runs. The assertion has headroom for

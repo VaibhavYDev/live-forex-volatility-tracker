@@ -7,14 +7,14 @@ most projects.
 ## The short version
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # then set FX_PROVIDER_TOKEN
 docker compose up -d          # Redis, TimescaleDB, ingestor, worker, API, web
 open http://localhost:5173
 ```
 
-That is the whole demo path. The default provider is `replay`, a deterministic
-synthetic feed, so nothing above needs an API key or a network connection to a
-market data vendor.
+The application serves real market data only, so it needs a Tiingo API token.
+The test suite needs none: it drives the pipeline with controlled inputs that
+never reach a running stack.
 
 ## Working on the code
 

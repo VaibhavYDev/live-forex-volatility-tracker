@@ -1,5 +1,6 @@
 # =============================================================================
-# The public demo. Used ALONE, not layered over docker-compose.yml:
+# The hosted deployment. Real market data only: it refuses to start without
+# FX_PROVIDER_TOKEN. Used ALONE, not layered over docker-compose.yml:
 #
 #     docker compose -f docker-compose.prod.yml up -d --build
 #
@@ -29,11 +30,9 @@ x-python: &python
     dockerfile: infra/docker/Dockerfile.python
   environment: &pyenv
     REDIS_URL: redis://redis:6379/0
-    FX_PROVIDER: replay
+    FX_PROVIDER: tiingo
+    FX_PROVIDER_TOKEN: ${FX_PROVIDER_TOKEN:?set FX_PROVIDER_TOKEN in .env - this deployment serves real market data only}
     FX_SYMBOLS: "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF"
-    FX_REPLAY_TICKS_PER_SEC: "25"
-    FX_REPLAY_SEED: "42"
-    FX_REPLAY_BURST_EVERY_S: "90"
     LOG_LEVEL: INFO
   depends_on:
     redis: {condition: service_healthy}
@@ -83,9 +82,10 @@ services:
        "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
     environment:
       <<: *pyenv
-      # The demo has no login, so a browser cannot fetch a ticket. Auth defaults
-      # to ON in code; this is the explicit, documented opt-out. Abuse is bounded
-      # by the API's own rate limiter, and the data is synthetic.
+      # There is no login, so a browser cannot fetch a ticket. Auth defaults to
+      # ON in code; this is the explicit, documented opt-out, and it means anyone
+      # who reaches the hostname sees the feed. Confirm the data provider's terms
+      # allow public display before exposing it.
       FX_REQUIRE_WS_TICKET: "0"
       FX_HEALTH_PORT: "8000"
     healthcheck:

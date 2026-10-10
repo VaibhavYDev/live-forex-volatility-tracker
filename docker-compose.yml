@@ -1,13 +1,11 @@
 # =============================================================================
-# One command, working dashboard, no API key:
+# Real market data only:
 #
-#     cp .env.example .env && docker compose up
+#     cp .env.example .env   # then set FX_PROVIDER_TOKEN
+#     docker compose up
 #
-# The default provider is `replay`, a deterministic synthetic feed. A reviewer
-# who cannot run the project in sixty seconds will not read the architecture, so
-# "no signup required" is a feature, not a shortcut.
-#
-# Point it at a real feed by setting FX_PROVIDER=tiingo and FX_PROVIDER_TOKEN.
+# Without a token the ingestor exits with EX_CONFIG (78) and the dashboard reports
+# no feed. There is no simulated fallback.
 # =============================================================================
 
 name: fx-volatility
@@ -102,10 +100,9 @@ services:
        "--proxy-headers", "--no-access-log"]
     ports: ["8000:8000"]
     environment:
-      # The demo dashboard has no login, so it cannot fetch a ticket. Auth
-      # defaults to ON in code (see fx_api/config.py); this is the explicit
-      # opt-out that keeps `docker compose up` a one-command demo, and
-      # SECURITY.md records it as a local-development posture.
+      # The dashboard has no login, so it cannot fetch a ticket. Auth defaults
+      # to ON in code (see fx_api/config.py); this is the explicit opt-out for
+      # local use, and SECURITY.md records it as a local-development posture.
       FX_REQUIRE_WS_TICKET: "0"
       FX_HEALTH_PORT: "8000"
     healthcheck:

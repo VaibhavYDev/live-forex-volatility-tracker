@@ -5,17 +5,15 @@ from __future__ import annotations
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from fx_ingestor.providers import PROVIDERS
+
 
 class IngestorSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    provider: str = Field(default="replay", alias="FX_PROVIDER")
-    provider_token: str = Field(default="", alias="FX_PROVIDER_TOKEN")
+    provider: str = Field(default="tiingo", alias="FX_PROVIDER")
+    provider_token: str = Field(default="", alias="FX_PROVIDER_TOKEN", validate_default=True)
     symbols: str = Field(default="EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF", alias="FX_SYMBOLS")
-
-    replay_ticks_per_sec: float = Field(default=25.0, alias="FX_REPLAY_TICKS_PER_SEC")
-    replay_seed: int = Field(default=42, alias="FX_REPLAY_SEED")
-    replay_burst_every_s: float = Field(default=90.0, alias="FX_REPLAY_BURST_EVERY_S")
 
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     stream_retention_s: int = Field(default=900, alias="FX_STREAM_RETENTION_S")
@@ -36,9 +34,16 @@ class IngestorSettings(BaseSettings):
     @field_validator("provider")
     @classmethod
     def _known_provider(cls, v: str) -> str:
-        allowed = {"replay", "tiingo", "twelvedata"}
-        if v not in allowed:
-            raise ValueError(f"FX_PROVIDER must be one of {sorted(allowed)}, got {v!r}")
+        if v not in PROVIDERS:
+            raise ValueError(f"FX_PROVIDER must be one of {sorted(PROVIDERS)}, got {v!r}")
+        return v
+
+    @field_validator("provider_token")
+    @classmethod
+    def _token_present(cls, v: str) -> str:
+        # No credentials means no market data, and nothing else to show instead.
+        if not v.strip():
+            raise ValueError("FX_PROVIDER_TOKEN is required: only real market data is served")
         return v
 
     @property

@@ -1,5 +1,10 @@
+import { useEffect, useState } from "react";
 import { useQuote, useRegime } from "../lib/stream/hooks";
 import { RegimeBadge } from "./RegimeBadge";
+
+/** Same threshold as the banner's "Stale". */
+const QUOTE_STALE_S = 60;
+const RECHECK_MS = 15_000;
 
 /**
  * The leaf that pays for the whole store architecture.
@@ -25,6 +30,16 @@ export function SymbolTab({
   const regime = useRegime(symbol);
   const dp = symbol.endsWith("JPY") ? 3 : 5;
 
+  // A closed market sends no ticks, so nothing else would re-render this tab
+  // when its last quote crosses into stale.
+  const [, recheck] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => recheck((n) => n + 1), RECHECK_MS);
+    return () => window.clearInterval(t);
+  }, []);
+  const quotedAt = quote ? new Date(quote.ts) : null;
+  const stale = quotedAt !== null && (Date.now() - quotedAt.getTime()) / 1000 > QUOTE_STALE_S;
+
   return (
     <button
       type="button"
@@ -38,7 +53,12 @@ export function SymbolTab({
       onClick={() => onSelect(symbol)}
     >
       <span className="tab__sym">{symbol}</span>
-      <span className="tab__px">{quote ? quote.mid.toFixed(dp) : "—"}</span>
+      <span className="tab__px" data-stale={stale || undefined}>
+        {quote ? quote.mid.toFixed(dp) : "—"}
+      </span>
+      {stale && quotedAt && (
+        <span className="tab__at">as of {quotedAt.toISOString().slice(11, 16)} UTC</span>
+      )}
       {regime === "stressed" && <RegimeBadge regime="stressed" compact />}
     </button>
   );

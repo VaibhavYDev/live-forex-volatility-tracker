@@ -11,6 +11,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import asyncpg
 import pytest
 import redis.asyncio as aioredis
 from fx_core import keys
@@ -274,3 +275,31 @@ async def test_reapplying_the_alerts_migration_keeps_existing_transitions(db: Da
         kept = await conn.fetchval("SELECT count(*) FROM alert_events WHERE symbol = 'EURUSD'")
 
     assert kept == 1
+
+
+async def test_a_refused_alerts_migration_keeps_the_legacy_rows_and_the_views(
+    db: Database,
+) -> None:
+    """003 refuses to drop a legacy table that holds rows, after it has dropped the views."""
+    migration = Path(__file__).parents[2] / "infra" / "migrations" / "003_alert_events.sql"
+    async with db.pool.acquire() as conn:
+        await conn.execute("ALTER TABLE alert_events RENAME TO alert_events_current")
+        try:
+            await conn.execute("CREATE TABLE alert_events (rule_id INT NOT NULL)")
+            await conn.execute("INSERT INTO alert_events VALUES (1)")
+            with pytest.raises(asyncpg.RaiseError, match="legacy alert_events holds rows"):
+                await conn.execute(migration.read_text(encoding="utf-8"))
+            await conn.execute("ROLLBACK")
+            legacy = await conn.fetchval("SELECT count(*) FROM alert_events")
+            views = await conn.fetchval(
+                "SELECT count(*) FROM pg_views "
+                "WHERE viewname IN ('regime_current', 'alert_regime_gaps')"
+            )
+        finally:
+            # Whatever the migration did, put the real table and its views back.
+            await conn.execute("ROLLBACK")
+            await conn.execute("DROP TABLE IF EXISTS alert_events CASCADE")
+            await conn.execute("ALTER TABLE alert_events_current RENAME TO alert_events")
+            await conn.execute(migration.read_text(encoding="utf-8"))
+
+    assert (legacy, views) == (1, 2)

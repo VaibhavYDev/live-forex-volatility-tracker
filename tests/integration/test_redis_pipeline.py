@@ -16,10 +16,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import redis.asyncio as aioredis
 from fx_core import keys
-from fx_core.models import Bar, Tick, bars_per_year
+from fx_core.models import Bar, BarSource, Tick, bars_per_year
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import Ingestor
 from fx_ingestor.pipeline import IngestPipeline
+from fx_ingestor.providers import ProviderError
 from fx_platform import LeaderLease, close_redis
 from fx_worker.persister import Persister, run_forever
 
@@ -151,80 +152,140 @@ class TestIngestPipeline:
         assert len(history) == 1
 
 
+class StubHistory:
+    """The provider's history endpoint, answering from a fixed list or failing."""
+
+    def __init__(self, bars: list[Bar] | None = None, error: Exception | None = None) -> None:
+        self.bars = bars or []
+        self.error = error
+
+    async def backfill(
+        self, symbol: str, start: datetime, end: datetime, interval: str = "1m"
+    ) -> list[Bar]:
+        if self.error is not None:
+            raise self.error
+        return self.bars if interval == "1m" else []
+
+
 class TestProviderIsolation:
     """Live mode never invents a past, and no provider is served another's."""
 
     STATE = (keys.history("USDJPY"), keys.zhist("USDJPY"), keys.regime_state("USDJPY"))
 
-    async def _start(self, provider: str) -> None:
+    async def _ingest(self, history: StubHistory | None = None) -> None:
+        """The real ingestor's rehydration, with Tiingo's history endpoint stubbed."""
         ingestor = Ingestor(
             IngestorSettings(
-                FX_PROVIDER=provider,
+                FX_PROVIDER="tiingo",
                 FX_PROVIDER_TOKEN="t",
                 FX_SYMBOLS="USDJPY",
                 REDIS_URL=REDIS_URL,
             )
         )
+        ingestor._build_provider = lambda: history or StubHistory()  # type: ignore[assignment,method-assign,return-value]
         try:
             await ingestor._rehydrate()
         finally:
             await close_redis(ingestor.redis)
 
+    async def _switch(self, redis: aioredis.Redis, provider: str) -> IngestPipeline:
+        pipeline = IngestPipeline(redis, ["USDJPY"])
+        await pipeline.adopt_provider(provider)
+        await pipeline.restore_detectors()
+        return pipeline
+
     async def _sources(self, redis: aioredis.Redis, key: str) -> set[str]:
         return {json.loads(m)["src"] for m in await redis.zrange(key, 0, -1)}
 
-    async def test_a_live_feed_starts_without_synthetic_history(
+    async def test_a_live_feed_starts_with_only_its_providers_history(
         self, redis: aioredis.Redis
     ) -> None:
-        await self._start("tiingo")
+        recorded = Bar(
+            "USDJPY",
+            datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+            158.3,
+            158.4,
+            158.2,
+            158.35,
+            0,
+            0.0,
+            0.0,
+            BarSource.BACKFILL,
+        )
 
-        assert await redis.exists(keys.history("USDJPY"), keys.history("USDJPY", "1d")) == 0
+        await self._ingest(StubHistory([recorded]))
+
+        stored = [json.loads(m) for m in await redis.zrange(keys.history("USDJPY"), 0, -1)]
+        assert [(b["c"], b["src"]) for b in stored] == [(158.35, "backfill")]
         assert await redis.get(keys.PROVIDER) == "tiingo"
 
-    async def test_the_simulator_starts_with_its_synthetic_history(
+    async def test_history_the_provider_cannot_give_stays_absent(
         self, redis: aioredis.Redis
     ) -> None:
-        await self._start("replay")
+        await self._ingest(StubHistory(error=ProviderError("403: history not in plan")))
 
-        assert await self._sources(redis, keys.history("USDJPY")) == {"backfill"}
+        assert await redis.exists(keys.history("USDJPY"), keys.history("USDJPY", "1d")) == 0
 
-    async def test_switching_to_a_live_feed_parks_the_simulation(
+    async def test_provider_history_never_replaces_observed_bars(
         self, redis: aioredis.Redis
     ) -> None:
-        await self._start("replay")
+        await redis.set(keys.PROVIDER, "tiingo")
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
+        recorded = Bar(
+            "USDJPY",
+            datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            BarSource.BACKFILL,
+        )
+
+        await self._ingest(StubHistory([recorded]))
+
+        assert await self._sources(redis, keys.history("USDJPY")) == {"stream"}
+
+    async def test_switching_provider_parks_the_previous_state(self, redis: aioredis.Redis) -> None:
+        """An installation that ran the retired simulator, then starts on Tiingo."""
+        await redis.set(keys.PROVIDER, "replay")
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(147.2, "stream"): 1791561180})
         await redis.set(keys.regime_state("USDJPY"), "{}")
         await redis.hset(keys.quote("USDJPY"), mapping={"mid": "147.2"})
         await redis.hset(keys.vol_state("USDJPY", "1h"), mapping={"sigma": "0.1"})
 
-        await self._start("tiingo")
+        await self._ingest()
 
         assert await redis.exists(*self.STATE) == 0
         assert await redis.exists(keys.quote("USDJPY"), keys.vol_state("USDJPY", "1h")) == 0
-        parked = keys.archive("replay", keys.history("USDJPY"))
-        assert await self._sources(redis, parked) == {"backfill"}
+        parked = await redis.zrange(keys.archive("replay", keys.history("USDJPY")), 0, -1)
+        assert [json.loads(m)["c"] for m in parked] == [147.2]
         assert await redis.get(keys.archive("replay", keys.regime_state("USDJPY"))) == "{}"
 
     async def test_switching_back_restores_each_providers_own_state(
         self, redis: aioredis.Redis
     ) -> None:
-        await self._start("replay")
-        simulated = await redis.zcard(keys.history("USDJPY"))
-        await self._start("tiingo")
+        await self._switch(redis, "tiingo")
         await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
+        await self._switch(redis, "other")
+        await redis.zadd(keys.history("USDJPY"), {_bar_json(158.1, "stream"): 1791561240})
 
-        await self._start("replay")
+        await self._switch(redis, "tiingo")
 
-        assert await redis.zcard(keys.history("USDJPY")) == simulated
-        tiingo = keys.archive("tiingo", keys.history("USDJPY"))
-        assert await self._sources(redis, tiingo) == {"stream"}
+        live = await redis.zrange(keys.history("USDJPY"), 0, -1)
+        assert [json.loads(m)["c"] for m in live] == [158.344]
+        other = await redis.zrange(keys.archive("other", keys.history("USDJPY")), 0, -1)
+        assert [json.loads(m)["c"] for m in other] == [158.1]
 
     async def test_restarting_with_the_same_provider_keeps_its_history(
         self, redis: aioredis.Redis
     ) -> None:
-        await self._start("tiingo")
+        await self._ingest()
         await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
 
-        await self._start("tiingo")
+        await self._ingest()
 
         assert await self._sources(redis, keys.history("USDJPY")) == {"stream"}
         assert not [k async for k in redis.scan_iter("archive:*")]
@@ -236,7 +297,7 @@ class TestProviderIsolation:
         await redis.zadd(keys.history("USDJPY"), {_bar_json(500079.172, "stream"): 1791561180})
         await redis.set(keys.regime_state("USDJPY"), "{}")
 
-        await self._start("tiingo")
+        await self._ingest()
 
         assert await redis.exists(*self.STATE) == 0
         kept = await redis.zrange(keys.archive("unverified", keys.history("USDJPY")), 0, -1)
@@ -249,10 +310,53 @@ class TestProviderIsolation:
         await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
 
         with pytest.raises(aioredis.ResponseError, match="refusing to overwrite"):
-            await self._start("tiingo")
+            await self._ingest()
 
         assert await redis.zcard(parked) == await redis.zcard(keys.history("USDJPY")) == 1
         assert await redis.get(keys.PROVIDER) is None
+
+    async def test_a_new_feed_skips_the_minute_the_previous_one_wrote(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """bars_1m is keyed by (symbol, bucket): a shared minute merges both feeds' prices."""
+        last = datetime(2026, 10, 9, 15, 52, 40, tzinfo=UTC)
+        await redis.xadd(
+            keys.STREAM_TICKS,
+            {"s": "USDJPY", "b": "147.2", "a": "147.21", "t": last.isoformat(), "q": 1, "p": ""},
+        )
+        await redis.set(keys.PROVIDER, "replay")
+        pipeline = IngestPipeline(redis, ["USDJPY"])
+        await pipeline.adopt_provider("tiingo")
+
+        for seq, offset in enumerate((10, 20)):
+            await pipeline.handle(_tick("USDJPY", 158.344, last + timedelta(seconds=offset), seq))
+
+        written = [fields for _, fields in await redis.xrange(keys.STREAM_TICKS)][1:]
+        assert [(f["t"], f["p"]) for f in written] == [
+            ((last + timedelta(seconds=20)).isoformat(), "tiingo")
+        ]
+
+    async def test_a_new_feed_continues_the_transition_sequence(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """alert_events is unique on (symbol, seq): a reused seq drops the new alert."""
+
+        async def start(provider: str, issued: int) -> IngestPipeline:
+            previous = IngestPipeline(redis, ["USDJPY"])
+            previous.state_for("USDJPY").detector.trigger.seq = issued
+            snapshot = previous.state_for("USDJPY").detector.snapshot()
+            await redis.set(keys.regime_state("USDJPY"), json.dumps(snapshot))
+            pipeline = IngestPipeline(redis, ["USDJPY"])
+            await pipeline.adopt_provider(provider)
+            await pipeline.restore_detectors()
+            return pipeline
+
+        await redis.set(keys.PROVIDER, "other")
+        live = await start("tiingo", issued=7)
+        assert live.state_for("USDJPY").detector.trigger.seq == 7
+
+        back = await start("other", issued=12)
+        assert back.state_for("USDJPY").detector.trigger.seq == 12
 
 
 def _bar_json(price: float, src: str) -> str:
@@ -408,6 +512,31 @@ class TestPersisterRecovery:
 
         assert sum(b.tick_count for b in db.rows.values()) == 10
         assert (await redis.xpending(keys.STREAM_TICKS, keys.CONSUMER_GROUP))["pending"] == 0
+
+    async def test_a_return_never_spans_two_providers(self, redis: aioredis.Redis) -> None:
+        """Replay's last price to Tiingo's first is the gap between two feeds, not a move."""
+        db = StubDatabase()
+        persister = Persister(redis, db, consumer_name="w1")  # type: ignore[arg-type]
+        minute = datetime(2026, 10, 9, 15, 53, tzinfo=UTC)
+        for entry_id, price, ts, provider in (
+            ("1-0", 147.2, minute - timedelta(seconds=5), "replay"),
+            ("2-0", 158.344, minute, "tiingo"),
+            ("3-0", 158.345, minute + timedelta(seconds=5), "tiingo"),
+        ):
+            persister._ingest_entry(
+                entry_id,
+                {
+                    "s": "USDJPY",
+                    "b": str(price),
+                    "a": str(price),
+                    "t": ts.isoformat(),
+                    "p": provider,
+                },
+            )
+        await persister.flush()
+
+        live = db.rows[("USDJPY", minute)]
+        assert live.sum_ret_sq == pytest.approx(math.log(158.345 / 158.344) ** 2)
 
     async def _wait_for(self, db: StubDatabase, ticks: int) -> None:
         for _ in range(100):

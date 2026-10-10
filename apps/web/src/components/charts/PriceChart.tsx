@@ -201,13 +201,13 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
 
     // Provenance as ONE marker, not a band.
     //
-    // The band this replaces painted every synthesised bar amber. That was
-    // legible when a handful of minutes were backfilled; with 30 days of
-    // synthesised history behind a young feed it becomes a solid block across
-    // the whole chart, which distinguishes nothing and buries the candles.
+    // The band this replaces painted every backfilled bar amber. That was
+    // legible when a handful of minutes were backfilled; with days of provider
+    // history behind a young feed it becomes a solid block across the whole
+    // chart, which distinguishes nothing and buries the candles.
     //
     // The information anyone actually wants is the BOUNDARY: where does the
-    // synthesised past end and observed data begin. One marker says that
+    // provider's recorded history end and bars built from our own ticks begin. One marker says that
     // exactly, and says nothing when there is nothing to say.
     const firstLive = bars.findIndex((b) => b.src !== "backfill");
     const boundary =
@@ -297,9 +297,9 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
   // screen-reader summary reads, and it is throttled hard downstream. Sampling
   // it once per snapshot keeps React off the 50/sec path entirely.
   // Provenance in words. The marker shows WHERE the boundary is; this says HOW
-  // MUCH of what you are looking at was synthesised, which is the part that
-  // belongs in text rather than in pixels.
-  const synthetic = bars.filter((b) => b.src === "backfill").length;
+  // MUCH of what you are looking at came from provider history rather than our
+  // own stream, which is the part that belongs in text rather than in pixels.
+  const recorded = bars.filter((b) => b.src === "backfill").length;
 
   const dp = symbol.endsWith("JPY") ? 3 : 5;
   const open = bars[0]?.o;
@@ -307,7 +307,7 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
   const summary = useLiveSummary(
     last === null
       ? `${symbol} chart, waiting for data.`
-      : `${symbol} ${last.toFixed(dp)}, ${move === null ? "" : `${move >= 0 ? "up" : "down"} ${Math.abs(move).toFixed(2)} percent across the window, `}regime ${regime}.${synthetic ? ` ${synthetic} of ${bars.length} bars are synthesised history.` : ""}`,
+      : `${symbol} ${last.toFixed(dp)}, ${move === null ? "" : `${move >= 0 ? "up" : "down"} ${Math.abs(move).toFixed(2)} percent across the window, `}regime ${regime}.${recorded ? ` ${recorded} of ${bars.length} bars are provider history.` : ""}`,
     20_000,
   );
 
@@ -332,11 +332,11 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
             Waiting for {symbol} history…
           </span>
         )}
-        {synthetic > 0 && !loading && (
+        {recorded > 0 && !loading && (
           <span className="chart__note">
-            {synthetic === bars.length
-              ? "synthesised history"
-              : `${synthetic} of ${bars.length} bars synthesised`}
+            {recorded === bars.length
+              ? "provider history"
+              : `${recorded} of ${bars.length} bars from provider history`}
           </span>
         )}
       </div>

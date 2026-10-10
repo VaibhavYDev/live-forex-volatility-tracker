@@ -32,6 +32,11 @@ const STALE_CHECK_MS = 15_000;
  *  has to grow: 15s, 30s, 60s ... capped at five minutes. */
 const MAX_BACKOFF_CHECKS = 20; // 20 x 15s = 5 minutes
 
+const switchedProvider = (store: MarketStore, next: string | undefined): boolean => {
+  const current = store.feed().provider;
+  return current !== undefined && next !== undefined && current !== next;
+};
+
 export function useForexStream(store: MarketStore, url: string, symbols: string[]): void {
   const key = symbols.join(",");
   // Bumping this tears the socket down and builds a new one. That is the whole
@@ -155,11 +160,18 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
 
           case "status": {
             const { type: _, ...feed } = frame;
+            // The server swapped feeds under an open socket: drop the old one's
+            // series and resubscribe, so the snapshot is the new provider's.
+            if (switchedProvider(store, feed.provider)) {
+              store.clearMarket();
+              setAttempt((n) => n + 1);
+            }
             store.setFeed(feed);
             break;
           }
 
           case "hello":
+            if (switchedProvider(store, frame.feed.provider)) store.clearMarket();
             store.setFeed(frame.feed);
             break;
         }

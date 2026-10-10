@@ -297,6 +297,19 @@ export class MarketStore {
     this.#emit();
   }
 
+  /** Another provider's prices, z-scores and alerts are not this one's past. */
+  clearMarket(): void {
+    this.#quotes.clear();
+    this.#vol.clear();
+    this.#regime.clear();
+    this.#alerts.clear();
+    this.#bars.clear();
+    this.#z.clear();
+    this.#buf.clear();
+    for (const topic of this.#subs.keys()) this.#dirty.add(topic);
+    this.#emit();
+  }
+
   setConn(state: ConnState, attempt: number): void {
     this.#conn = { state, attempt };
     this.#dirty.add(CONN);

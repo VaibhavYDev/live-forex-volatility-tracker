@@ -202,6 +202,41 @@ describe("frame handling", () => {
     expect(screen.getByTestId("since")).toHaveTextContent(at(0));
   });
 
+  it("drops the previous provider's market data when the feed switches", () => {
+    // An open tab outlives an ingestor restart: without this, replay candles and
+    // alerts stay on screen and the live feed's first ticks extend them.
+    mount();
+    frame({
+      type: "alert",
+      s: "EURUSD",
+      seq: 1,
+      ts: at(3),
+      old_regime: "normal",
+      new_regime: "stressed",
+      trigger_value: 3.4,
+      threshold_value: 3,
+      sigma: 0.0004,
+      cause: "threshold",
+      reason: "held",
+    });
+    frame({ type: "tick", s: "EURUSD", b: 1.084, a: 1.0841, m: 1.08405, t: at(4) });
+    act(() => void flushFrames());
+    frame({ type: "status", state: "healthy", ts: at(5), provider: "replay" });
+    expect(read("alerts")).toBe("1");
+    const replaySocket = FakeSocket.last!;
+
+    frame({ type: "status", state: "healthy", ts: at(6), provider: "tiingo" });
+
+    expect([read("mid"), read("alerts"), read("regime"), read("provider")]).toEqual([
+      "—",
+      "0",
+      "unknown",
+      "tiingo",
+    ]);
+    expect(replaySocket.closed).toBe(true);
+    expect(FakeSocket.last).not.toBe(replaySocket);
+  });
+
   it("ignores frames it does not understand", () => {
     // Forward compatibility: a newer server adding a frame type must not break
     // an older tab.

@@ -10,9 +10,13 @@
 --
 -- Safe to re-run: only the legacy placeholder is dropped, and only while empty,
 -- so applying this to a database that already holds transitions keeps them.
+-- One transaction: psql -f otherwise commits statement by statement, and a
+-- refusal below would leave the views dropped.
 --
 -- Forward-only: 001 is not edited. Editing an applied migration is the sin.
 -- ============================================================================
+
+BEGIN;
 
 DROP VIEW IF EXISTS alert_regime_gaps;
 DROP VIEW IF EXISTS regime_current;
@@ -156,3 +160,4 @@ WHERE previous_seq IS NOT NULL
       -- Or the counter skipped, which means the same thing from the other side.
       OR seq <> previous_seq + 1
   );
+COMMIT;

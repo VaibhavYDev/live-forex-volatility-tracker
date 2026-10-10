@@ -15,7 +15,6 @@
  */
 
 import { useEffect, useState } from "react";
-import { demoSeries, isDemo } from "../demo";
 import { apiBase } from "./endpoints";
 import { useBars } from "./stream/hooks";
 import type { Bar } from "./stream/types";
@@ -34,15 +33,11 @@ export interface ChartBars {
 
 export function useChartBars(symbol: string, tf: Timeframe): ChartBars {
   const live = useBars(symbol);
-  // Demo builds carry every timeframe pre-folded by the same `fold()` the API
-  // uses, so there is nothing to fetch and nothing to fail.
-  const demo = isDemo();
   const [fetched, setFetched] = useState<readonly Bar[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (demo) return;
     // Drop the previous timeframe's bars on EVERY change, not just on the way
     // back to 1m. Mutation testing caught this: switching 1d -> 4h left the
     // daily series in state until the new response landed, so the chart drew
@@ -85,14 +80,8 @@ export function useChartBars(symbol: string, tf: Timeframe): ChartBars {
       controller.abort();
       clearInterval(timer);
     };
-  }, [symbol, tf, demo]);
+  }, [symbol, tf]);
 
-  if (demo) {
-    // 1m still comes from the store so the live tick keeps building its candle.
-    return tf === LIVE_TF
-      ? { bars: live, loading: false, error: false }
-      : { bars: demoSeries(symbol, tf), loading: false, error: false };
-  }
   return tf === LIVE_TF
     ? { bars: live, loading: false, error: false }
     : { bars: fetched, loading, error };

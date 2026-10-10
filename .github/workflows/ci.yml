@@ -87,43 +87,6 @@ jobs:
       - run: npm run test:coverage
       - run: npm run build
 
-  demo:
-    # The published link is the most-clicked thing in this repo and the easiest
-    # to break silently, because docs/ is a committed artifact: nothing about
-    # editing the source makes it fail, it just quietly stops matching. So
-    # rebuild it, assert the committed copy is byte-identical, then load the
-    # result under every path shape a host might serve it from — a subpath, a
-    # domain root, a deep CDN path, the 404 fallback, and straight off disk.
-    #
-    # Four published demos in a row came up blank for path reasons that one
-    # eyeballed URL could not have caught, because the same file is correct
-    # under one prefix and broken under another.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
-      - run: npm ci
-        working-directory: apps/web
-      - run: npx playwright install --with-deps chromium
-        working-directory: apps/web
-
-      - name: Rebuild the published bundle
-        # The build runs in a subshell so the next line still starts at the repo
-        # root. Chaining `cd apps/web` then `cd ..` lands in apps/, not the root,
-        # which is exactly how this shipped broken the first time.
-        run: |
-          (cd apps/web && VITE_DEMO=1 npm run build)
-          node scripts/inline_demo.mjs
-
-      - name: Committed copy is identical to the rebuild
-        run: |
-          git diff --exit-code --stat docs/ \
-            || { echo "::error::docs/ is stale — run 'make demo' and commit the result"; exit 1; }
-
-      - name: The published page actually comes up
-        run: node scripts/verify_demo.mjs
-
   load:
     # Not a merge gate. The numbers behind docs/benchmarks.md need to execute
     # somewhere other than on demand, but a benchmark on a shared runner is too
@@ -149,36 +112,47 @@ jobs:
         run: uv run pytest tests/load -m load -q -s --timeout=300
 
   compose:
-    # Proves the claim on the README's first screen: `docker compose up` works.
+    # The stack as a user first runs it: no market-data credentials. Everything
+    # builds and boots, the ingestor refuses to start rather than invent prices,
+    # readiness says so, and the dashboard shows no data instead of made-up data.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
+      - run: npm ci
+        working-directory: apps/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
       - run: cp .env.example .env
       - run: docker compose config --quiet
       - run: docker compose build --parallel
-      - name: Boot the stack and assert it becomes ready
+      - name: Boot without credentials and assert nothing is fabricated
         run: |
-          # `up -d` has its own failure mode: a dependency can exit during init,
-          # and then compose reports only "container X exited (3)" — which names
-          # the container and says nothing about why. The logs that would explain
-          # it are printed on the readiness path below and nowhere else, so that
-          # failure arrives with no diagnosis attached. Dump state on every exit.
+          # `up -d` can fail with only "container X exited (3)", which names the
+          # container and says nothing about why. Dump state on any failure.
           dump() { docker compose ps -a; docker compose logs --no-color --tail=200; }
+          trap '[ $? -eq 0 ] || dump' EXIT
 
-          if ! docker compose up -d; then
-            echo "::error::compose up failed before the stack was running"
-            dump
-            exit 1
-          fi
-
+          docker compose up -d
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8000/readyz | grep -q '"ready":true'; then
-              echo "stack ready after ${i}s"; exit 0
-            fi
+            curl -sf http://localhost:8000/healthz >/dev/null && break
             sleep 1
           done
-          echo "::error::stack did not become ready"
-          dump
-          exit 1
+          curl -sf http://localhost:8000/healthz >/dev/null
+
+          # No token, no feed: the ingestor exits with EX_CONFIG. There is no
+          # simulator to fall back to.
+          for i in $(seq 1 30); do
+            docker compose logs ingestor 2>&1 | grep -q "FX_PROVIDER_TOKEN is required" && break
+            sleep 1
+          done
+          docker compose logs ingestor 2>&1 | grep -q "FX_PROVIDER_TOKEN is required"
+
+          code=$(curl -s -o readyz.json -w '%{http_code}' http://localhost:8000/readyz)
+          cat readyz.json
+          [ "$code" = 503 ] && grep -q '"ready":false' readyz.json
+
+          node scripts/verify_app.mjs http://localhost:5173
       - if: always()
         run: docker compose down -v
