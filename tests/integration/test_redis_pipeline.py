@@ -153,10 +153,15 @@ class TestIngestPipeline:
 
 
 class StubHistory:
-    """The provider's history endpoint, answering from a fixed list or failing."""
+    """The provider's history endpoint, answering per interval or failing."""
 
-    def __init__(self, bars: list[Bar] | None = None, error: Exception | None = None) -> None:
-        self.bars = bars or []
+    def __init__(
+        self,
+        minutes: list[Bar] | None = None,
+        days: list[Bar] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.served = {"1m": minutes or [], "1d": days or []}
         self.error = error
 
     async def backfill(
@@ -164,7 +169,7 @@ class StubHistory:
     ) -> list[Bar]:
         if self.error is not None:
             raise self.error
-        return self.bars if interval == "1m" else []
+        return [b for b in self.served[interval] if start <= b.bucket <= end]
 
 
 class TestProviderIsolation:
@@ -202,7 +207,7 @@ class TestProviderIsolation:
     ) -> None:
         recorded = Bar(
             "USDJPY",
-            datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+            datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=5),
             158.3,
             158.4,
             158.2,
@@ -213,10 +218,13 @@ class TestProviderIsolation:
             BarSource.BACKFILL,
         )
 
-        await self._ingest(StubHistory([recorded]))
+        await self._ingest(StubHistory(minutes=[recorded], days=[_day(1, 158.1)]))
 
-        stored = [json.loads(m) for m in await redis.zrange(keys.history("USDJPY"), 0, -1)]
-        assert [(b["c"], b["src"]) for b in stored] == [(158.35, "backfill")]
+        for interval, close in (("1m", 158.35), ("1d", 158.1)):
+            stored = await redis.zrange(keys.history("USDJPY", interval), 0, -1)
+            assert [(json.loads(m)["c"], json.loads(m)["src"]) for m in stored] == [
+                (close, "backfill")
+            ]
         assert await redis.get(keys.PROVIDER) == "tiingo"
 
     async def test_history_the_provider_cannot_give_stays_absent(
@@ -233,7 +241,7 @@ class TestProviderIsolation:
         await redis.zadd(keys.history("USDJPY"), {_bar_json(158.344, "stream"): 1791561180})
         recorded = Bar(
             "USDJPY",
-            datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+            datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=5),
             1.0,
             1.0,
             1.0,
@@ -244,7 +252,7 @@ class TestProviderIsolation:
             BarSource.BACKFILL,
         )
 
-        await self._ingest(StubHistory([recorded]))
+        await self._ingest(StubHistory(minutes=[recorded]))
 
         assert await self._sources(redis, keys.history("USDJPY")) == {"stream"}
 
@@ -357,6 +365,58 @@ class TestProviderIsolation:
 
         back = await start("other", issued=12)
         assert back.state_for("USDJPY").detector.trigger.seq == 12
+
+
+class TestDailyHistory:
+    """The provider's daily series stays current while the feed runs."""
+
+    KEY = keys.history("USDJPY", "1d")
+
+    async def _closes(self, redis: aioredis.Redis) -> list[float]:
+        return [json.loads(m)["c"] for m in await redis.zrange(self.KEY, 0, -1)]
+
+    async def test_a_missing_series_is_loaded_whole(self, redis: aioredis.Redis) -> None:
+        await IngestPipeline(redis, ["USDJPY"]).refresh_daily_history(
+            StubHistory(days=[_day(400, 150.0), _day(1, 158.0)])
+        )
+
+        assert await self._closes(redis) == [150.0, 158.0]
+
+    async def test_a_refresh_replaces_recent_days_and_renews_the_expiry(
+        self, redis: aioredis.Redis
+    ) -> None:
+        pipeline = IngestPipeline(redis, ["USDJPY"])
+        await pipeline.refresh_daily_history(StubHistory(days=[_day(400, 150.0), _day(1, 158.0)]))
+        await redis.expire(self.KEY, 60)
+
+        await pipeline.refresh_daily_history(StubHistory(days=[_day(1, 158.5), _day(0, 159.0)]))
+
+        assert await self._closes(redis) == [150.0, 158.5, 159.0]
+        assert await redis.ttl(self.KEY) > 3600
+
+    async def test_a_failed_refresh_keeps_the_stored_series(self, redis: aioredis.Redis) -> None:
+        pipeline = IngestPipeline(redis, ["USDJPY"])
+        await pipeline.refresh_daily_history(StubHistory(days=[_day(1, 158.0)]))
+
+        await pipeline.refresh_daily_history(StubHistory(error=ProviderError("timeout")))
+
+        assert await self._closes(redis) == [158.0]
+
+
+def _day(ago: int, close: float) -> Bar:
+    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return Bar(
+        "USDJPY",
+        midnight - timedelta(days=ago),
+        close,
+        close,
+        close,
+        close,
+        0,
+        0.0,
+        0.0,
+        BarSource.BACKFILL,
+    )
 
 
 def _bar_json(price: float, src: str) -> str:

@@ -96,12 +96,12 @@ REGIME_RESTORED = Counter("fx_regime_restored_total", "Detector states rehydrate
 GAP_BAR_MULTIPLE = 3
 
 
-# How much of the provider's own past to load into an empty cache: one day of
-# minutes, which is all the live series keeps, and ten years of days for 1d/1w/1M.
-_HISTORY_PLAN: tuple[tuple[str, int, int], ...] = (
-    ("1m", 60, 1_440),
-    ("1d", 86_400, 3_650),
-)
+# How much of the provider's own past to load: a day of minutes, which is all the
+# live series keeps; ten years of days for 1d/1w/1M, of which the last week is
+# re-read on every refresh.
+_MINUTE_HISTORY = timedelta(minutes=1_440)
+_DAILY_HISTORY = timedelta(days=3_650)
+_DAILY_REFRESHED = timedelta(days=7)
 
 # One atomic step, so a crash cannot leave two providers' state half-swapped.
 # KEYS: the provider marker, then (live, parked, restored) per state key, then
@@ -536,57 +536,76 @@ class IngestPipeline:
         return label, int(parked)
 
     async def seed_history(self, provider: MarketDataProvider) -> int:
-        """Load the provider's own record of the past into empty history keys.
+        """Load the provider's own minute bars into an EMPTY minute series.
 
-        Only an EMPTY key is written, so bars the feed observed are never
+        Only an empty series is written, so bars the feed observed are never
         replaced. When the provider has no history to give - no endpoint, no
-        entitlement, an outage - the key stays empty and the API reports
+        entitlement, an outage - the series stays empty and the API reports
         warming_up: an absent past is shown as absent, never invented.
         """
-        end = datetime.now(UTC)
         written = 0
         for symbol in self.symbols:
-            for interval, seconds, count in _HISTORY_PLAN:
-                key = keys.history(symbol, interval)
-                if await self._redis.exists(key):
-                    continue
-                try:
-                    bars = await provider.backfill(
-                        symbol, end - timedelta(seconds=seconds * count), end, interval
-                    )
-                except ProviderError as exc:
-                    log.warning(
-                        "history.unavailable", symbol=symbol, interval=interval, error=str(exc)
-                    )
-                    continue
-                if not bars:
-                    continue
-                pipe = self._redis.pipeline(transaction=False)
-                # Chunked: one ZADD of thousands of members is a single huge
-                # command that blocks the event loop on serialisation.
-                for first in range(0, len(bars), 1_000):
-                    pipe.zadd(
-                        key,
-                        {
-                            json.dumps(
-                                {
-                                    "t": int(b.bucket.timestamp()),
-                                    "o": b.open,
-                                    "h": b.high,
-                                    "l": b.low,
-                                    "c": b.close,
-                                    "n": b.tick_count,
-                                    "src": str(b.source),
-                                }
-                            ): int(b.bucket.timestamp())
-                            for b in bars[first : first + 1_000]
-                        },
-                    )
-                pipe.expire(key, keys.TTL_HISTORY_S)
-                await pipe.execute()
-                written += len(bars)
-                log.info("history.seeded", symbol=symbol, interval=interval, bars=len(bars))
+            if not await self._redis.exists(keys.history(symbol)):
+                written += await self._store_history(provider, symbol, "1m", _MINUTE_HISTORY)
         return written
+
+    async def refresh_daily_history(self, provider: MarketDataProvider) -> int:
+        """Keep the provider's daily series current while the feed runs.
+
+        Nothing but provider bars lives in it, so the last week is re-read and
+        replaces the stored days, which carries the forming day and any revision;
+        a missing series is loaded whole. Each refresh renews the TTL, so the
+        series lasts as long as the feed does rather than until a restart.
+        """
+        written = 0
+        for symbol in self.symbols:
+            stored = await self._redis.exists(keys.history(symbol, "1d"))
+            span = _DAILY_REFRESHED if stored else _DAILY_HISTORY
+            written += await self._store_history(provider, symbol, "1d", span)
+        return written
+
+    async def _store_history(
+        self, provider: MarketDataProvider, symbol: str, interval: str, span: timedelta
+    ) -> int:
+        end = datetime.now(UTC)
+        try:
+            bars = await provider.backfill(symbol, end - span, end, interval)
+        except ProviderError as exc:
+            log.warning("history.unavailable", symbol=symbol, interval=interval, error=str(exc))
+            return 0
+        if not bars:
+            return 0
+        key = keys.history(symbol, interval)
+        epochs = [int(b.bucket.timestamp()) for b in bars]
+        # One transaction, so no reader sees the replaced stretch missing.
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.zremrangebyscore(key, min(epochs), max(epochs))
+        # Chunked: one ZADD of thousands of members is a single huge command
+        # that blocks the event loop on serialisation.
+        for first in range(0, len(bars), 1_000):
+            pipe.zadd(
+                key,
+                {
+                    json.dumps(
+                        {
+                            "t": t,
+                            "o": b.open,
+                            "h": b.high,
+                            "l": b.low,
+                            "c": b.close,
+                            "n": b.tick_count,
+                            "src": str(b.source),
+                        }
+                    ): t
+                    for b, t in zip(
+                        bars[first : first + 1_000], epochs[first : first + 1_000], strict=True
+                    )
+                },
+            )
+        pipe.expire(key, keys.TTL_HISTORY_S)
+        await pipe.execute()
+        log.info("history.stored", symbol=symbol, interval=interval, bars=len(bars))
+        return len(bars)
 
     async def restore_detectors(self) -> int:
         """Rehydrate every symbol's detector from Redis. Called on lease acquisition.

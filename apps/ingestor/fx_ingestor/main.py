@@ -25,6 +25,7 @@ import structlog
 from fx_core import keys
 from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.pipeline import IngestPipeline
@@ -50,6 +51,10 @@ MIN_HEALTHY_SESSION_S = 30.0
 # the 60s staleness thresholds in /readyz and the browser banner, so a single
 # missed write never reads as an outage.
 HEARTBEAT_S = 5.0
+
+# The provider's daily series is re-read this often while leading, so it stays
+# current and never expires mid-run. Hourly is far inside Tiingo's request limits.
+DAILY_HISTORY_REFRESH_S = 3600.0
 
 
 class Ingestor:
@@ -231,8 +236,19 @@ class Ingestor:
                 current=self.cfg.provider,
                 parked_keys=switched[1],
             )
-        await self.pipeline.seed_history(self._build_provider())
+        provider = self._build_provider()
+        await self.pipeline.seed_history(provider)
+        await self.pipeline.refresh_daily_history(provider)
         await self.pipeline.restore_detectors()
+
+    async def _refresh_daily_history(self) -> None:
+        """Runs beside the feed, so a slow history request never delays a tick."""
+        while True:
+            await asyncio.sleep(DAILY_HISTORY_REFRESH_S)
+            try:
+                await self.pipeline.refresh_daily_history(self._build_provider())
+            except RedisError as exc:
+                log.warning("history.refresh_failed", error=str(exc))
 
     def _since(self) -> str:
         return self._last_status.get("since", self._last_status.get("ts", ""))
@@ -281,7 +297,13 @@ class Ingestor:
                     # as "normal", reports NORMAL, and never emits the clear the
                     # stored 'stressed' row is waiting for.
                     await self._rehydrate()
-                    await self._run_as_leader()
+                    refresher = asyncio.create_task(self._refresh_daily_history())
+                    try:
+                        await self._run_as_leader()
+                    finally:
+                        refresher.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await refresher
                 if self.lease.lost.is_set() and not self._shutdown.is_set():
                     log.warning("leadership.lost_reentering_standby")
         finally:

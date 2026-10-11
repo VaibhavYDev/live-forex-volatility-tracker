@@ -41,8 +41,9 @@ Then open <http://localhost:5173>.
 Only real market data is shown. There is no simulated feed and no fallback to
 one: without `FX_PROVIDER_TOKEN` the ingestor exits and the dashboard reports no
 feed. On start the chart loads the provider's own history where the account is
-entitled to it, tagged `backfill`; otherwise it says it is waiting for history
-until real bars arrive. The status reads **Live** only once a real quote has
+entitled to it, tagged `backfill`, and re-reads the last week of daily bars every
+hour while it runs; otherwise it says it is waiting for history until real bars
+arrive. The status reads **Live** only once a real quote has
 arrived and the heartbeat is fresh, and a quote the market has stopped updating
 is shown with the time it was quoted. Switching provider sets the previous one's
 history and detector state aside in Redis under `archive:<provider>:` rather
