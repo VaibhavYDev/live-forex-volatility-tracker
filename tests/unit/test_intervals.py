@@ -137,9 +137,55 @@ class TestFold:
 
 
 def test_every_ordered_code_is_a_real_interval() -> None:
-    # ORDER drives the UI buttons; a typo would render a control that 400s.
-    assert set(ORDER) == set(INTERVALS)
-    assert len(ORDER) == len(INTERVALS)
+    # ORDER drives the UI buttons; a typo would render a control that 422s.
+    assert set(ORDER) <= set(INTERVALS)
+
+
+def test_the_dashboard_offers_exactly_the_requested_timeframes() -> None:
+    assert ORDER == ("1m", "3m", "5m", "10m", "15m", "30m", "1d")
+
+
+PAIRS = {"EURUSD": 1.0842, "GBPUSD": 1.2712, "USDJPY": 147.236, "AUDUSD": 0.6617, "USDCHF": 0.8731}
+
+
+class TestShortIntervals:
+    """3m and 10m fold the stored minutes exactly as 5m does."""
+
+    @pytest.mark.parametrize(("code", "edge"), [("3m", "13:45:00"), ("10m", "13:40:00")])
+    def test_buckets_land_on_utc_edges(self, code: str, edge: str) -> None:
+        assert bucket_start(ts("2026-03-11T13:47:31"), code) == ts(f"2026-03-11T{edge}")
+
+    @pytest.mark.parametrize("symbol", PAIRS)
+    @pytest.mark.parametrize(("code", "candles"), [("3m", 4), ("10m", 2)])
+    def test_every_pair_folds_without_inventing_minutes(
+        self, symbol: str, code: str, candles: int
+    ) -> None:
+        # 13:40-13:47 traded, 13:48-13:53 nothing did, 13:54-13:55 is still forming.
+        px, step = PAIRS[symbol], PAIRS[symbol] * 1e-4
+        base = [
+            bar(
+                ts(f"2026-03-11T13:{m}:00"),
+                o=px + i * step,
+                h=px + (i + 2) * step,
+                low=px + (i - 1) * step,
+                c=px + (i + 1) * step,
+                n=3,
+            )
+            for i, m in enumerate([*range(40, 48), 54, 55])
+        ]
+        seconds = INTERVALS[code].seconds
+        assert seconds is not None
+
+        out = fold(base, code)
+
+        assert len(out) == candles
+        for candle in out:
+            members = [b for b in base if int(b["t"]) - int(b["t"]) % seconds == candle["t"]]
+            assert candle["t"] % seconds == 0
+            assert (candle["o"], candle["c"]) == (members[0]["o"], members[-1]["c"])
+            assert candle["h"] == max(float(b["h"]) for b in members)  # type: ignore[arg-type]
+            assert candle["l"] == min(float(b["l"]) for b in members)  # type: ignore[arg-type]
+            assert candle["n"] == 3 * len(members)
 
 
 class TestBaseCount:
@@ -167,6 +213,10 @@ class TestBaseCount:
         # 31, not 30: a 30-day assumption returns a short chart every February.
         assert base_count("1M", 12) == 403
 
+    def test_short_intervals_read_their_minutes(self) -> None:
+        assert base_count("3m", 100) == 303
+        assert base_count("10m", 100) == 1_010
+
     def test_every_interval_can_be_costed(self) -> None:
-        for code in ORDER:
+        for code in INTERVALS:
             assert base_count(code, 200) > 0

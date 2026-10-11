@@ -17,7 +17,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fx_core import keys
 from fx_core.calendar import active_sessions, is_market_open, next_close, next_open
-from fx_core.intervals import INTERVALS, ORDER, base_count, fold
+from fx_core.intervals import INTERVALS, base_count, fold
 from fx_core.models import Bar, BarSource, Estimator, VolSnapshot
 from fx_core.volatility import (
     close_to_close,
@@ -160,7 +160,7 @@ def _interval(raw: str) -> str:
     if raw not in INTERVALS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"interval must be one of {', '.join(ORDER)}",
+            detail=f"interval must be one of {', '.join(INTERVALS)}",
         )
     return raw
 

@@ -10,7 +10,7 @@ So intraday and long-range read from different stored series, which is what real
 vendors do rather than a compromise around them. Tiingo and Polygon will sell you
 minute bars for recent weeks and daily bars for decades, for exactly this reason:
 
-    1m  5m  15m  30m  1h  4h   <- folded from the stored 1-minute series
+    1m  3m  5m  10m  15m  30m  1h  4h   <- folded from the stored 1-minute series
     1d  1w  1M                 <- folded from the stored daily series
 
 Every fixed interval below divides evenly into 86_400, so buckets align to
@@ -37,7 +37,9 @@ class Interval:
 
 INTERVALS: Final[dict[str, Interval]] = {
     "1m": Interval("1m", 60, "1m"),
+    "3m": Interval("3m", 180, "1m"),
     "5m": Interval("5m", 300, "1m"),
+    "10m": Interval("10m", 600, "1m"),
     "15m": Interval("15m", 900, "1m"),
     "30m": Interval("30m", 1_800, "1m"),
     "1h": Interval("1h", 3_600, "1m"),
@@ -47,9 +49,10 @@ INTERVALS: Final[dict[str, Interval]] = {
     "1M": Interval("1M", None, "1d"),
 }
 
-#: Ordered for the UI. Dict order is insertion order, but relying on that for a
-#: user-visible control is the kind of coupling that breaks on a refactor.
-ORDER: Final[tuple[str, ...]] = ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M")
+#: The timeframes the dashboard offers, in display order. Dict order is insertion
+#: order, but relying on that for a user-visible control is the kind of coupling
+#: that breaks on a refactor. Every interval above stays available to the API.
+ORDER: Final[tuple[str, ...]] = ("1m", "3m", "5m", "10m", "15m", "30m", "1d")
 
 
 def bucket_start(epoch: int, interval: str) -> int:

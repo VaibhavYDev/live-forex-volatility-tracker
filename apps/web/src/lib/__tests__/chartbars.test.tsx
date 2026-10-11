@@ -75,10 +75,10 @@ describe("the live timeframe", () => {
 describe("fetched timeframes", () => {
   it("requests the interval it was asked for", async () => {
     vi.mocked(fetch).mockResolvedValue(ok([bar(0)]));
-    mount("4h");
+    mount("10m");
 
     await waitFor(() => expect(fetch).toHaveBeenCalled());
-    expect(vi.mocked(fetch).mock.calls[0]![0]).toContain("interval=4h");
+    expect(vi.mocked(fetch).mock.calls[0]![0]).toContain("interval=10m");
   });
 
   it("stays on this origin so the proxy can do its job", async () => {
@@ -91,7 +91,7 @@ describe("fetched timeframes", () => {
 
   it("renders what came back", async () => {
     vi.mocked(fetch).mockResolvedValue(ok([bar(0, 1.5), bar(60, 1.7)]));
-    mount("1h");
+    mount("3m");
     await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("2"));
     expect(screen.getByTestId("last")).toHaveTextContent("1.7");
   });
@@ -99,21 +99,21 @@ describe("fetched timeframes", () => {
   it("says so when the request fails", async () => {
     // An empty pane is indistinguishable from "this market has no history".
     vi.mocked(fetch).mockResolvedValue({ ok: false, status: 500 } as Response);
-    mount("1w");
+    mount("1d");
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("error"));
   });
 
   it("says so when the network is gone", async () => {
     vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
-    mount("1w");
+    mount("1d");
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("error"));
   });
 });
 
 describe("switching away mid-flight", () => {
   it("does not let a stale response overwrite the current timeframe", async () => {
-    // The race: click 1w, it is slow, click 5m, 5m returns first, THEN 1w
-    // lands. Without the guard the chart shows weekly candles while the button
+    // The race: click 1D, it is slow, click 5m, 5m returns first, THEN 1D
+    // lands. Without the guard the chart shows daily candles while the button
     // row says 5m — and the next 60s refresh silently corrects it, so it looks
     // like a transient glitch rather than a bug.
     let resolveSlow!: (r: Response) => void;
@@ -122,7 +122,7 @@ describe("switching away mid-flight", () => {
     });
     vi.mocked(fetch).mockReturnValueOnce(slow).mockResolvedValue(ok([bar(0, 5.5)]));
 
-    const view = mount("1w");
+    const view = mount("1d");
     view.rerender(
       <StoreCtx.Provider value={store}>
         <Probe tf="5m" />
@@ -143,7 +143,7 @@ describe("switching away mid-flight", () => {
     // Aborting is what WE did on purpose. Surfacing it would flash an error
     // banner every time somebody clicks along the row.
     //
-    // Two details make this test able to fail. The destination is 4h, not 1m:
+    // Two details make this test able to fail. The destination is 10m, not 1m:
     // on the live timeframe the hook reports error:false unconditionally, so
     // nothing about the guard would be observable. And the SECOND request never
     // settles, because a successful response clears the error flag on its way
@@ -161,21 +161,21 @@ describe("switching away mid-flight", () => {
       )
       .mockReturnValue(new Promise<Response>(() => {}));
 
-    const view = mount("1w");
+    const view = mount("1d");
     view.rerender(
       <StoreCtx.Provider value={store}>
-        <Probe tf="4h" />
+        <Probe tf="10m" />
       </StoreCtx.Provider>,
     );
 
     await waitFor(() => expect(aborted).toBe(1));
-    // Still waiting on 4h, so "loading" is correct and "error" is not.
+    // Still waiting on 10m, so "loading" is correct and "error" is not.
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("loading"));
   });
 
   it("drops the previous series before the new one arrives", async () => {
-    // 1d -> 4h with the second request still in flight. Holding the daily bars
-    // meanwhile draws them under a 4h label - confidently wrong data for the
+    // 1d -> 10m with the second request still in flight. Holding the daily bars
+    // meanwhile draws them under a 10m label - confidently wrong data for the
     // width of one round trip.
     vi.mocked(fetch).mockResolvedValueOnce(ok([bar(0, 3.3), bar(86_400, 3.4)]));
     const view = mount("1d");
@@ -184,7 +184,7 @@ describe("switching away mid-flight", () => {
     vi.mocked(fetch).mockReturnValue(new Promise<Response>(() => {})); // never settles
     view.rerender(
       <StoreCtx.Provider value={store}>
-        <Probe tf="4h" />
+        <Probe tf="10m" />
       </StoreCtx.Provider>,
     );
 
