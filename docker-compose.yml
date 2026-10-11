@@ -14,7 +14,9 @@ x-python: &python
   build:
     context: .
     dockerfile: infra/docker/Dockerfile.python
-  env_file: [.env]
+  # FX_ENV_FILE selects another .env. Point COMPOSE_ENV_FILES (or --env-file)
+  # at the same file so ${...} interpolation reads it too.
+  env_file: ["${FX_ENV_FILE:-.env}"]
   environment:
     REDIS_URL: redis://redis:6379/0
     DATABASE_URL: postgresql://${POSTGRES_USER:-fx}:${POSTGRES_PASSWORD:-fx}@timescale:5432/${POSTGRES_DB:-fx}
