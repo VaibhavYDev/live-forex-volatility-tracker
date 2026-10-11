@@ -97,8 +97,8 @@ GAP_BAR_MULTIPLE = 3
 
 
 # How much of the provider's own past to load: a day of minutes, which is all the
-# live series keeps; ten years of days for 1d/1w/1M, of which the last week is
-# re-read on every refresh.
+# live series keeps; ten years of days for 1d/1w/1M (or as far back as the
+# provider serves), of which the last week is re-read on every refresh.
 _MINUTE_HISTORY = timedelta(minutes=1_440)
 _DAILY_HISTORY = timedelta(days=3_650)
 _DAILY_REFRESHED = timedelta(days=7)

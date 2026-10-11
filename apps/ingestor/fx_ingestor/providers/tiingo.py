@@ -45,6 +45,9 @@ REST_URL = "https://api.tiingo.com/tiingo/fx/{symbol}/prices"
 _QUOTE = "Q"
 _EXPECTED_FIELDS = 8
 _RESAMPLE = {"1m": "1min", "1d": "1day"}
+# Tiingo serves FX history from this date and rejects an earlier startDate with
+# HTTP 400, which would lose the whole request rather than just the older part.
+_HISTORY_START = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 class TiingoProvider(MarketDataProvider):
@@ -167,6 +170,7 @@ class TiingoProvider(MarketDataProvider):
         render it distinctly. Provenance is the whole point: a number you cannot
         trace is a number you cannot trust.
         """
+        start = max(start, _HISTORY_START)
         params = {
             "startDate": start.date().isoformat(),
             "endDate": end.date().isoformat(),

@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import DAILY_HISTORY_REFRESH_S, Ingestor
+from fx_ingestor.pipeline import _DAILY_HISTORY, _DAILY_REFRESHED
 from fx_ingestor.providers import ProviderError, TiingoProvider, tiingo
 from pydantic import ValidationError
 
@@ -88,6 +89,39 @@ async def test_history_the_account_may_not_read_is_a_recoverable_error(
 
     with pytest.raises(ProviderError, match="history unavailable"):
         await TiingoProvider(["USDJPY"], token="t").backfill("USDJPY", END - timedelta(days=1), END)
+
+
+def tiingo_daily(request: httpx.Request) -> httpx.Response:
+    """Tiingo's answer: FX history begins 2020-01-01 and an earlier start is a 400."""
+    start = request.url.params["startDate"]
+    if start < "2020-01-01":
+        return httpx.Response(400, json={"detail": "Start date must be >= 2020-01-01"})
+    rows = [
+        {"date": f"{day}T00:00:00.000Z", "open": o, "high": h, "low": low, "close": c}
+        for day, o, h, low, c in (
+            ("2020-01-01", 1.1215, 1.1236, 1.1199, 1.1224),
+            ("2026-10-09", 1.1180, 1.1225, 1.1171, 1.1201),
+        )
+        if day >= start
+    ]
+    return httpx.Response(200, json=rows)
+
+
+@pytest.mark.parametrize(
+    ("span", "start_date", "closes"),
+    [(_DAILY_HISTORY, "2020-01-01", [1.1224, 1.1201]), (_DAILY_REFRESHED, "2026-10-03", [1.1201])],
+)
+async def test_daily_history_starts_no_earlier_than_tiingo_serves(
+    monkeypatch: pytest.MonkeyPatch, span: timedelta, start_date: str, closes: list[float]
+) -> None:
+    """The first daily load asks for ten years. Tiingo rejected all of it, so the
+    daily series never loaded; clamped, everything Tiingo has arrives."""
+    seen = serve(monkeypatch, tiingo_daily)
+
+    bars = await TiingoProvider(["EURUSD"], token="t").backfill("EURUSD", END - span, END, "1d")
+
+    assert seen[0].url.params["startDate"] == start_date
+    assert [b.close for b in bars] == closes
 
 
 async def test_the_daily_series_is_refreshed_while_the_feed_runs(
