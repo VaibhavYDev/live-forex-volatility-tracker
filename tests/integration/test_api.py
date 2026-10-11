@@ -27,6 +27,7 @@ from fx_api.main import create_app
 from fx_api.routers.market import _Cache, _compare_cache
 from fx_api.ws.manager import ConnectionManager
 from fx_core import keys
+from fx_core.intervals import INTERVALS, ORDER
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import REDIS_URL
@@ -143,6 +144,28 @@ class TestMarketRest:
         stamps = [b["t"] for b in body["bars"]]
         assert stamps == sorted(stamps)
         assert body["warming_up"] is False
+
+    @pytest.mark.parametrize("interval", ORDER)
+    @pytest.mark.parametrize("symbol", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"])
+    def test_every_offered_timeframe_serves_every_pair(
+        self, client: TestClient, redis_sync: Any, symbol: str, interval: str
+    ) -> None:
+        seed_bars(redis_sync, symbol, count=40)
+        day = int(datetime(2026, 8, 20, tzinfo=UTC).timestamp())
+        daily = {
+            _bar(day + i * 86_400, 1.08, 1.09, 1.07, 1.085): day + i * 86_400 for i in range(3)
+        }
+        redis_sync.zadd(keys.history(symbol, "1d"), daily)
+
+        body = client.get(f"/api/bars/{symbol}?interval={interval}").json()
+
+        seconds = INTERVALS[interval].seconds
+        assert seconds is not None
+        assert body["interval"] == interval
+        assert body["bars"]
+        for c in body["bars"]:
+            assert c["t"] % seconds == 0
+            assert c["l"] <= min(c["o"], c["c"]) <= max(c["o"], c["c"]) <= c["h"]
 
     def test_an_unknown_symbol_is_empty_rather_than_an_error(self, client: TestClient) -> None:
         body = client.get("/api/bars/GBPUSD").json()
