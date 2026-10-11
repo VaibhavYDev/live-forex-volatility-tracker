@@ -101,6 +101,7 @@ class Persister:
 
         self._accs: dict[tuple[str, int], BucketAccumulator] = {}
         self._last_price: dict[str, float] = {}
+        self._provider: dict[str, str] = {}
         self._max_id: dict[tuple[str, int], str] = {}
         self._unacked: list[str] = []
         self._last_flush = time.monotonic()
@@ -134,6 +135,11 @@ class Persister:
 
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
+        provider = fields.get("p", "")
+        if self._provider.get(symbol, provider) != provider:
+            # The step from one feed's price to another's is not a return of either.
+            self._last_price.pop(symbol, None)
+        self._provider[symbol] = provider
         mid = (bid + ask) / 2.0
         bucket = floor_to_bucket(ts, self._bucket_seconds)
         key = (symbol, int(bucket.timestamp()))

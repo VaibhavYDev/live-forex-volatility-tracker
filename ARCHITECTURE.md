@@ -360,9 +360,8 @@ Two more that cost little:
 
 MLH and GSoC reviewers grade on *contributor experience*, not just code:
 
-- **`docker compose up` → working app with seeded data, one command, no API key required**
-  (ship a recorded-tick replay provider as the default). If a reviewer can't run it in 60
-  seconds, the architecture doesn't matter.
+- **`docker compose up` → working app in one command once a provider token is set.** Real
+  market data only: there is no simulated default and no fallback to one.
 - **`docs/adr/`** — numbered decision records. `0004-why-not-kafka.md` is more persuasive
   than any amount of code.
 - **A load generator** that replays a recorded session at 100× so you can publish a real
@@ -386,7 +385,6 @@ forex-volatility-tracker/
 │   │   │   ├── base.py              # MarketDataProvider Protocol  <-- the extension point
 │   │   │   ├── tiingo.py            # positional-array parser, isolated here
 │   │   │   ├── twelvedata.py
-│   │   │   └── replay.py            # recorded ticks; makes `docker compose up` key-free
 │   │   ├── supervisor.py            # backoff + jitter, watchdog, circuit breaker
 │   │   ├── leader.py                # Redis lease acquire/renew/release
 │   │   ├── backfill.py              # gap detection -> REST -> source='backfill'

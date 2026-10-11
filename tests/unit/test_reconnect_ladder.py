@@ -56,7 +56,7 @@ class FakeClock:
 
 def build(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> tuple[Ingestor, list[float]]:
     """An Ingestor with Redis, the provider and sleeping all replaced."""
-    cfg = IngestorSettings(FX_PROVIDER="replay", FX_SYMBOLS="EURUSD")
+    cfg = IngestorSettings(FX_PROVIDER="tiingo", FX_PROVIDER_TOKEN="t", FX_SYMBOLS="EURUSD")
     monkeypatch.setattr("fx_ingestor.main.make_redis", lambda _url: None)
     monkeypatch.setattr("fx_ingestor.supervisor._DEFAULT_RNG", random.Random(0))
     ing = Ingestor(cfg)

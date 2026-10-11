@@ -24,10 +24,17 @@ from datetime import UTC, datetime
 import structlog
 from fx_core import keys
 from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
+from pydantic import ValidationError
+from redis.exceptions import RedisError
 
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.pipeline import IngestPipeline
-from fx_ingestor.providers import ProviderAuthError, ProviderError, build_provider
+from fx_ingestor.providers import (
+    MarketDataProvider,
+    ProviderAuthError,
+    ProviderError,
+    build_provider,
+)
 from fx_ingestor.supervisor import BackoffPolicy, CircuitBreaker, StalenessWatchdog
 
 log = structlog.get_logger(__name__)
@@ -45,15 +52,9 @@ MIN_HEALTHY_SESSION_S = 30.0
 # missed write never reads as an outage.
 HEARTBEAT_S = 5.0
 
-
-def _provider_kwargs(cfg: IngestorSettings) -> dict[str, object]:
-    if cfg.provider == "replay":
-        return {
-            "ticks_per_sec": cfg.replay_ticks_per_sec,
-            "seed": cfg.replay_seed,
-            "burst_every_s": cfg.replay_burst_every_s,
-        }
-    return {"token": cfg.provider_token}
+# The provider's daily series is re-read this often while leading, so it stays
+# current and never expires mid-run. Hourly is far inside Tiingo's request limits.
+DAILY_HISTORY_REFRESH_S = 3600.0
 
 
 class Ingestor:
@@ -66,7 +67,6 @@ class Ingestor:
             bucket_seconds=cfg.bucket_seconds,
             ewma_lambda=cfg.ewma_lambda,
             retention_s=cfg.stream_retention_s,
-            backfill_seed=cfg.replay_seed,
         )
         self.lease = LeaderLease(
             self.redis, keys.LEADER_LEASE, cfg.lease_ttl_ms, cfg.lease_renew_ms
@@ -126,9 +126,7 @@ class Ingestor:
 
     async def _consume_once(self) -> None:
         """One connection lifetime. Returns cleanly when the socket closes."""
-        provider = build_provider(
-            self.cfg.provider, self.cfg.symbol_list, **_provider_kwargs(self.cfg)
-        )
+        provider = self._build_provider()
 
         async def on_stale() -> None:
             log.warning("feed.stale_forcing_reconnect")
@@ -142,14 +140,19 @@ class Ingestor:
             await provider.close()
 
         async with provider:
-            await self._publish_status("healthy")
+            # A socket is not a feed: "healthy" waits for the first real quote.
+            await self._publish_status("connecting", "waiting for the first quote")
             self.pipeline.set_feed_stale(False)
             self._force_reconnect.clear()
+            quoted = False
 
             async with StalenessWatchdog(self.cfg.staleness_timeout_s, on_stale) as watchdog:
                 async for tick in provider.stream():
                     watchdog.pet()
                     await self.pipeline.handle(tick)
+                    if not quoted:
+                        quoted = True
+                        await self._publish_status("healthy")
                     if self._shutdown.is_set() or self.lease.lost.is_set():
                         break
 
@@ -218,6 +221,35 @@ class Ingestor:
                         attempt += 1
                     await asyncio.sleep(delay)
 
+    def _build_provider(self) -> MarketDataProvider:
+        return build_provider(
+            self.cfg.provider, self.cfg.symbol_list, token=self.cfg.provider_token
+        )
+
+    async def _rehydrate(self) -> None:
+        """This provider's own past only: its parked state and its own history."""
+        switched = await self.pipeline.adopt_provider(self.cfg.provider)
+        if switched is not None and switched != ("unverified", 0):
+            log.error(
+                "provider.switched",
+                previous=switched[0],
+                current=self.cfg.provider,
+                parked_keys=switched[1],
+            )
+        provider = self._build_provider()
+        await self.pipeline.seed_history(provider)
+        await self.pipeline.refresh_daily_history(provider)
+        await self.pipeline.restore_detectors()
+
+    async def _refresh_daily_history(self) -> None:
+        """Runs beside the feed, so a slow history request never delays a tick."""
+        while True:
+            await asyncio.sleep(DAILY_HISTORY_REFRESH_S)
+            try:
+                await self.pipeline.refresh_daily_history(self._build_provider())
+            except RedisError as exc:
+                log.warning("history.refresh_failed", error=str(exc))
+
     def _since(self) -> str:
         return self._last_status.get("since", self._last_status.get("ts", ""))
 
@@ -264,12 +296,14 @@ class Ingestor:
                     # now - so if it is promoted mid-crisis it learns the crisis
                     # as "normal", reports NORMAL, and never emits the clear the
                     # stored 'stressed' row is waiting for.
-                    # Before anything else: a cold deployment has no past, and
-                    # an empty chart is indistinguishable from a broken one.
-                    # No-ops once history exists.
-                    await self.pipeline.backfill_history()
-                    await self.pipeline.restore_detectors()
-                    await self._run_as_leader()
+                    await self._rehydrate()
+                    refresher = asyncio.create_task(self._refresh_daily_history())
+                    try:
+                        await self._run_as_leader()
+                    finally:
+                        refresher.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await refresher
                 if self.lease.lost.is_set() and not self._shutdown.is_set():
                     log.warning("leadership.lost_reentering_standby")
         finally:
@@ -308,6 +342,9 @@ def run() -> None:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except ValidationError as exc:
+        print(f"ingestor not started: {exc}", file=sys.stderr)
+        sys.exit(78)  # EX_CONFIG
     except ProviderAuthError:
         sys.exit(78)  # EX_CONFIG - a config problem, not a crash
 

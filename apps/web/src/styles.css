@@ -255,6 +255,13 @@ body {
   font-size: 15px;
   font-weight: 600;
 }
+.tab__px[data-stale] {
+  color: var(--text-dim);
+}
+.tab__at {
+  font-size: 10px;
+  color: var(--text-dim);
+}
 
 /* --------------------------------------------------------------- regime --- */
 .regime {

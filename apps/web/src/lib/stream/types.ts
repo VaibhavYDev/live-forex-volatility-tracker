@@ -1,6 +1,6 @@
 export type Regime = "normal" | "stressed" | "unknown";
 export type TransitionCause = "threshold" | "baseline_thaw" | "observation_lost";
-export type FeedState = "healthy" | "degraded" | "fatal" | "stopped" | "unknown";
+export type FeedState = "connecting" | "healthy" | "degraded" | "fatal" | "stopped" | "unknown";
 export type ConnState = "connecting" | "open" | "reconnecting" | "closed";
 
 export interface Quote {
@@ -72,7 +72,7 @@ export interface FeedStatus {
   /** When the state last CHANGED. Lets the banner say "degraded for 12 minutes"
    *  instead of just "degraded". */
   readonly since?: string;
-  /** "replay" is the synthetic generator, not a market feed. */
+  /** The market-data provider that produced this feed, e.g. "tiingo". */
   readonly provider?: string;
 }
 

@@ -102,6 +102,18 @@ describe("liveness", () => {
     expect(banner).not.toHaveTextContent("Live");
   });
 
+  it("is not Live while the socket waits for its first real quote", () => {
+    // Connected is not live: a closed market or a silent subscription opens a
+    // socket that never carries a price.
+    feed("connecting", { ts: ago(1), detail: "waiting for the first quote", provider: "tiingo" });
+    mount();
+
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Waiting for feed");
+    expect(banner).toHaveTextContent("waiting for the first quote");
+    expect(banner).not.toHaveTextContent("Live");
+  });
+
   it("reads Live for a real provider", () => {
     feed("healthy", { ts: ago(1), provider: "tiingo" });
     mount();

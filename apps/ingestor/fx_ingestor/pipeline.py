@@ -55,19 +55,19 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
 from fx_core import keys
 from fx_core.alerts import DetectorConfig, Regime, RegimeDetector, RegimeTransition, TriggerConfig
 from fx_core.alerts.detector import DetectorSnapshot
-from fx_core.backfill import synth_bars
 from fx_core.models import Bar, Estimator, Tick, VolSnapshot
 from fx_core.volatility import BucketAccumulator, EwmaVariance, RollingWindow
 from fx_core.volatility.buckets import floor_to_bucket
 from prometheus_client import Counter, Gauge, Histogram
 
-from fx_ingestor.providers.replay import SYMBOL_DEFAULTS
+from fx_ingestor.providers import MarketDataProvider, ProviderError
 
 log = structlog.get_logger(__name__)
 
@@ -96,16 +96,42 @@ REGIME_RESTORED = Counter("fx_regime_restored_total", "Detector states rehydrate
 GAP_BAR_MULTIPLE = 3
 
 
-# How much past to synthesise, and at what resolution. 30 days of minutes
-# covers every intraday timeframe (4h needs 180 candles = 30 days); 10 years of
-# days covers 1w and 1M, where 200 weekly candles alone is four years.
-_BACKFILL_PLAN: tuple[tuple[str, int, int], ...] = (
-    ("1m", 60, 43_200),  # 30 days
-    ("1d", 86_400, 3_650),  # 10 years
-)
+# How much of the provider's own past to load: a day of minutes, which is all the
+# live series keeps; ten years of days for 1d/1w/1M, of which the last week is
+# re-read on every refresh.
+_MINUTE_HISTORY = timedelta(minutes=1_440)
+_DAILY_HISTORY = timedelta(days=3_650)
+_DAILY_REFRESHED = timedelta(days=7)
 
-#: (price, annual_vol, pip) for a symbol the replay provider has no spec for.
-_BACKFILL_FALLBACK = (1.0000, 0.080, 0.0001)
+# One atomic step, so a crash cannot leave two providers' state half-swapped.
+# KEYS: the provider marker, then (live, parked, restored) per state key, then
+# caches to drop. ARGV: the marker value read beforehand, the new provider, and
+# the number of state keys.
+_ADOPT_PROVIDER_LUA = """
+if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then
+    return redis.error_reply('provider marker changed concurrently')
+end
+for i = 2, 3 * tonumber(ARGV[3]) + 1, 3 do
+    if redis.call('EXISTS', KEYS[i]) == 1 and redis.call('EXISTS', KEYS[i + 1]) == 1 then
+        return redis.error_reply('refusing to overwrite ' .. KEYS[i + 1])
+    end
+end
+local parked = 0
+for i = 2, 3 * tonumber(ARGV[3]) + 1, 3 do
+    if redis.call('EXISTS', KEYS[i]) == 1 then
+        redis.call('RENAME', KEYS[i], KEYS[i + 1])
+        parked = parked + 1
+    end
+    if redis.call('EXISTS', KEYS[i + 2]) == 1 then
+        redis.call('RENAME', KEYS[i + 2], KEYS[i])
+    end
+end
+for i = 3 * tonumber(ARGV[3]) + 2, #KEYS do
+    redis.call('DEL', KEYS[i])
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return parked
+"""
 
 
 class SymbolState:
@@ -142,19 +168,17 @@ class IngestPipeline:
         retention_s: int = 900,
         detector_config: DetectorConfig | None = None,
         trigger_config: TriggerConfig | None = None,
-        backfill_seed: int = 42,
     ) -> None:
         self._redis = redis
         self._bucket_seconds = bucket_seconds
         self._retention_ms = retention_s * 1000
-        # Shared with the replay provider so the synthesised past and the live
-        # feed are two stretches of one process, not two unrelated walks.
-        self._backfill_seed = backfill_seed
         self._detector_config = detector_config or DetectorConfig()
         self._trigger_config = trigger_config or TriggerConfig()
         self._feed_is_stale = False
         self._state = {s: self._new_state(s, ewma_lambda) for s in symbols}
         self._ewma_lambda = ewma_lambda
+        self._provider = ""
+        self._held_until: datetime | None = None
 
     def _new_state(self, symbol: str, ewma_lambda: float) -> SymbolState:
         detector = RegimeDetector(
@@ -189,6 +213,8 @@ class IngestPipeline:
 
     # ------------------------------------------------------------------ ticks
     async def handle(self, tick: Tick) -> None:
+        if self._held_until is not None and tick.ts_event < self._held_until:
+            return
         st = self.state_for(tick.symbol)
         mid = tick.mid
         INGEST_LAG.observe(max(tick.ingest_lag_s, 0.0))
@@ -232,6 +258,7 @@ class IngestPipeline:
                 "a": repr(tick.ask),
                 "t": tick.ts_event.isoformat(),
                 "q": tick.seq,
+                "p": self._provider,
             },
             minid=int(datetime.now(UTC).timestamp() * 1000) - self._retention_ms,
             approximate=True,
@@ -461,60 +488,124 @@ class IngestPipeline:
         ).inc()
 
     # ----------------------------------------------------------- rehydration
-    async def backfill_history(self) -> int:
-        """Give a cold deployment a past, once.
+    async def adopt_provider(self, provider: str) -> tuple[str, int] | None:
+        """Leave only this provider's history and detector state live.
 
-        A container that started sixty seconds ago has sixty seconds of chart,
-        nothing at all above the 1h timeframe, and a blank z-score pane for the
-        first half hour while the detector's baseline warms. That is what a
-        reviewer opening the demo link actually sees, and it reads as a broken
-        product rather than a new one.
-
-        Two series, because one cannot serve both ends: 1-minute bars for 30
-        days feed 1m through 4h, and daily bars for 10 years feed 1d/1w/1M. A
-        week of 1-minute bars would be 10_080 candles at 0.09px each.
-
-        IDEMPOTENT BY CONSTRUCTION. Writes only into an EMPTY key, so a restart
-        never overwrites bars the feed actually observed, and two replicas
-        racing on lease acquisition cannot interleave two different pasts - the
-        generator is deterministic, so they would write identical bytes anyway.
+        The previous provider's are renamed under ``keys.archive`` rather than
+        deleted, and this provider's own archive, if any, comes back. State with
+        no recorded provider is parked as "unverified": nothing proves which feed
+        produced it. Quote and volatility caches describe the old feed and go.
+        Ticks are dropped until the minute after the previous feed's last tick:
+        bars_1m is keyed by (symbol, bucket), so a minute both feeds wrote would
+        merge their prices into one row.
+        Returns (previous provider, keys parked) when the provider changed.
         """
-        if not self.symbols:
-            return 0
+        self._provider = provider
+        previous = await self._redis.get(keys.PROVIDER)
+        if previous == provider:
+            return None
+        label = str(previous or "unverified")
+        state = [
+            key
+            for symbol in self.symbols
+            for key in (
+                keys.history(symbol),
+                keys.history(symbol, "1d"),
+                keys.zhist(symbol),
+                keys.regime_state(symbol),
+            )
+        ]
+        moves = [
+            k for key in state for k in (key, keys.archive(label, key), keys.archive(provider, key))
+        ]
+        caches = [k for s in self.symbols for k in (keys.quote(s), keys.vol_state(s, "1h"))]
+        parked = await self._redis.eval(
+            _ADOPT_PROVIDER_LUA,
+            1 + len(moves) + len(caches),
+            keys.PROVIDER,
+            *moves,
+            *caches,
+            previous or "",
+            provider,
+            len(state),
+        )
+        newest: Any = await self._redis.xrevrange(keys.STREAM_TICKS, count=1)
+        if newest:
+            last = floor_to_bucket(datetime.fromisoformat(newest[0][1]["t"]), self._bucket_seconds)
+            self._held_until = last + timedelta(seconds=self._bucket_seconds)
+        return label, int(parked)
 
-        now = int(datetime.now(UTC).timestamp())
+    async def seed_history(self, provider: MarketDataProvider) -> int:
+        """Load the provider's own minute bars into an EMPTY minute series.
+
+        Only an empty series is written, so bars the feed observed are never
+        replaced. When the provider has no history to give - no endpoint, no
+        entitlement, an outage - the series stays empty and the API reports
+        warming_up: an absent past is shown as absent, never invented.
+        """
         written = 0
-
         for symbol in self.symbols:
-            spec = SYMBOL_DEFAULTS.get(symbol)
-            price, vol, pip = (spec.price, spec.daily_vol, spec.pip) if spec else _BACKFILL_FALLBACK
-            for interval, seconds, count in _BACKFILL_PLAN:
-                key = keys.history(symbol, interval)
-                if await self._redis.exists(key):
-                    continue
-
-                bars = synth_bars(
-                    end_epoch=now,
-                    count=count,
-                    seconds=seconds,
-                    price=price,
-                    annual_vol=vol,
-                    pip=pip,
-                    seed=self._backfill_seed,
-                )
-                pipe = self._redis.pipeline(transaction=False)
-                # Chunked: one ZADD of 43_200 members is a single huge command
-                # that blocks the event loop on serialisation and can exceed the
-                # proto-max-bulk-len on a default Redis config.
-                for start in range(0, len(bars), 1_000):
-                    chunk = bars[start : start + 1_000]
-                    pipe.zadd(key, {json.dumps(b): b["t"] for b in chunk})
-                pipe.expire(key, keys.TTL_HISTORY_S)
-                await pipe.execute()
-                written += len(bars)
-                log.info("backfill.written", symbol=symbol, interval=interval, bars=len(bars))
-
+            if not await self._redis.exists(keys.history(symbol)):
+                written += await self._store_history(provider, symbol, "1m", _MINUTE_HISTORY)
         return written
+
+    async def refresh_daily_history(self, provider: MarketDataProvider) -> int:
+        """Keep the provider's daily series current while the feed runs.
+
+        Nothing but provider bars lives in it, so the last week is re-read and
+        replaces the stored days, which carries the forming day and any revision;
+        a missing series is loaded whole. Each refresh renews the TTL, so the
+        series lasts as long as the feed does rather than until a restart.
+        """
+        written = 0
+        for symbol in self.symbols:
+            stored = await self._redis.exists(keys.history(symbol, "1d"))
+            span = _DAILY_REFRESHED if stored else _DAILY_HISTORY
+            written += await self._store_history(provider, symbol, "1d", span)
+        return written
+
+    async def _store_history(
+        self, provider: MarketDataProvider, symbol: str, interval: str, span: timedelta
+    ) -> int:
+        end = datetime.now(UTC)
+        try:
+            bars = await provider.backfill(symbol, end - span, end, interval)
+        except ProviderError as exc:
+            log.warning("history.unavailable", symbol=symbol, interval=interval, error=str(exc))
+            return 0
+        if not bars:
+            return 0
+        key = keys.history(symbol, interval)
+        epochs = [int(b.bucket.timestamp()) for b in bars]
+        # One transaction, so no reader sees the replaced stretch missing.
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.zremrangebyscore(key, min(epochs), max(epochs))
+        # Chunked: one ZADD of thousands of members is a single huge command
+        # that blocks the event loop on serialisation.
+        for first in range(0, len(bars), 1_000):
+            pipe.zadd(
+                key,
+                {
+                    json.dumps(
+                        {
+                            "t": t,
+                            "o": b.open,
+                            "h": b.high,
+                            "l": b.low,
+                            "c": b.close,
+                            "n": b.tick_count,
+                            "src": str(b.source),
+                        }
+                    ): t
+                    for b, t in zip(
+                        bars[first : first + 1_000], epochs[first : first + 1_000], strict=True
+                    )
+                },
+            )
+        pipe.expire(key, keys.TTL_HISTORY_S)
+        await pipe.execute()
+        log.info("history.stored", symbol=symbol, interval=interval, bars=len(bars))
+        return len(bars)
 
     async def restore_detectors(self) -> int:
         """Rehydrate every symbol's detector from Redis. Called on lease acquisition.
@@ -563,6 +654,20 @@ class IngestPipeline:
                 baseline_samples=detector.baseline.n,
                 learned_hours=detector.profile.learned_hours,
             )
+
+        # A seq identifies a transition in alert_events whichever feed issued it,
+        # and the persister drops a reused one as a collision: never fall below
+        # what a parked provider's detector has already used.
+        async for key in self._redis.scan_iter(match=keys.archive("*", keys.regime_state("*"))):
+            symbol = key.rsplit(":", 1)[1]
+            raw = await self._redis.get(key)
+            try:
+                parked_seq = int(json.loads(raw or "")["trigger"]["seq"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if symbol in self._state:
+                trigger = self._state[symbol].detector.trigger
+                trigger.seq = max(trigger.seq, parked_seq)
 
         REGIME_RESTORED.inc(restored)
         log.info("regime.rehydrated", restored=restored, of=len(symbols))

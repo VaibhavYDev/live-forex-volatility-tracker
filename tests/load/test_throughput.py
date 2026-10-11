@@ -15,9 +15,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fx_api.ws.conflator import ClientSession
-from fx_core.models import Tick
 from fx_core.volatility import BucketAccumulator, EwmaVariance, Welford
-from fx_ingestor.providers.replay import ReplayProvider
 
 pytestmark = pytest.mark.load
 
@@ -80,29 +78,6 @@ def test_conflation_bounds_memory_under_a_firehose() -> None:
 
     assert len(session.pending) == len(SYMBOLS)
     assert session.conflated == published - len(SYMBOLS)
-
-
-async def test_replay_provider_sustains_target_rate() -> None:
-    """The replay feed must actually deliver what it promises, or load numbers lie."""
-    target = 2_000.0
-    provider = ReplayProvider(SYMBOLS, ticks_per_sec=target, seed=1, burst_every_s=0)
-    await provider.connect()
-
-    ticks: list[Tick] = []
-    start = time.perf_counter()
-    async for tick in provider.stream():
-        ticks.append(tick)
-        if len(ticks) >= 4_000:
-            break
-    elapsed = time.perf_counter() - start
-    await provider.close()
-
-    rate = len(ticks) / elapsed
-    print(f"\n  target:   {target:,.0f} ticks/s")
-    print(f"  achieved: {rate:,.0f} ticks/s over {len(ticks):,} ticks")
-
-    assert rate > target * 0.4, f"replay provider only reached {rate:.0f}/s"
-    assert all(t.bid < t.ask for t in ticks), "replay produced a crossed book"
 
 
 async def test_broadcast_latency_across_many_clients() -> None:

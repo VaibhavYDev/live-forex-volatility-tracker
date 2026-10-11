@@ -8,12 +8,30 @@
 -- carrying a `rule_id NOT NULL` foreign key into a system-generated event would
 -- mean inventing a fake rule for every transition.
 --
+-- Safe to re-run: only the legacy placeholder is dropped, and only while empty,
+-- so applying this to a database that already holds transitions keeps them.
+-- One transaction: psql -f otherwise commits statement by statement, and a
+-- refusal below would leave the views dropped.
+--
 -- Forward-only: 001 is not edited. Editing an applied migration is the sin.
 -- ============================================================================
 
+BEGIN;
+
 DROP VIEW IF EXISTS alert_regime_gaps;
 DROP VIEW IF EXISTS regime_current;
-DROP TABLE IF EXISTS alert_events;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'alert_events' AND column_name = 'rule_id'
+    ) THEN
+        IF EXISTS (SELECT 1 FROM alert_events) THEN
+            RAISE EXCEPTION 'legacy alert_events holds rows; migrate them before applying 003';
+        END IF;
+        DROP TABLE alert_events;
+    END IF;
+END $$;
 
 -- ------------------------------------------------------------------ enums ---
 -- Mirrors fx_core.alerts.hysteresis.Regime. Two states, and the machine
@@ -41,7 +59,7 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 -- ------------------------------------------------------------------ table ---
-CREATE TABLE alert_events (
+CREATE TABLE IF NOT EXISTS alert_events (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     symbol          TEXT             NOT NULL REFERENCES instruments(symbol),
 
@@ -94,8 +112,8 @@ CREATE TABLE alert_events (
 -- ever grew by three orders of magnitude, partition by month with pg_partman and
 -- move idempotency to a content hash.
 
-CREATE INDEX alert_events_symbol_ts ON alert_events (symbol, ts DESC);
-CREATE INDEX alert_events_open_regimes ON alert_events (symbol, ts DESC)
+CREATE INDEX IF NOT EXISTS alert_events_symbol_ts ON alert_events (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS alert_events_open_regimes ON alert_events (symbol, ts DESC)
     WHERE new_regime = 'stressed';
 
 COMMENT ON COLUMN alert_events.seq IS
@@ -142,3 +160,4 @@ WHERE previous_seq IS NOT NULL
       -- Or the counter skipped, which means the same thing from the other side.
       OR seq <> previous_seq + 1
   );
+COMMIT;

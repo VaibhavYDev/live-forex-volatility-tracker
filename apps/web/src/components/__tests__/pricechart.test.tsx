@@ -236,9 +236,9 @@ describe("lifecycle", () => {
 
 describe("provenance", () => {
   /**
-   * This replaced a full-width amber band drawn under every synthesised bar.
+   * This replaced a full-width amber band drawn under every backfilled bar.
    * That was readable when a handful of minutes were backfilled, and became a
-   * solid block across the whole chart once 30 days of history were synthesised
+   * solid block across the whole chart once days of history were backfilled
    * behind a young feed — distinguishing nothing and burying the candles it sat
    * under. The boundary is the part worth showing.
    */
@@ -272,27 +272,27 @@ describe("provenance", () => {
   const boundary = () =>
     markers().find((m: { text?: string }) => /live from here/i.test(String(m.text)));
 
-  it("marks where synthesised history ends and live data begins", () => {
+  it("marks where provider history ends and live data begins", () => {
     act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
     mount("EURUSD");
     expect(boundary()).toBeDefined();
   });
 
-  it("places it on the first live bar, not the last synthetic one", () => {
+  it("places it on the first live bar, not the last recorded one", () => {
     act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
     mount("EURUSD");
     expect(boundary()?.time).toBe(T0 + 120);
   });
 
   it("says nothing when every bar is live", () => {
-    // A marker on a chart with nothing synthesised is noise claiming to be
+    // A marker on a chart with no provider history is noise claiming to be
     // information.
     act(() => store.setBars({ EURUSD: mixed("stream", "stream") }));
     mount("EURUSD");
     expect(boundary()).toBeUndefined();
   });
 
-  it("says nothing when every bar is synthesised", () => {
+  it("says nothing when every bar is provider history", () => {
     // There is no boundary inside this window; the caption carries it instead.
     act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
     mount("EURUSD");
@@ -302,20 +302,20 @@ describe("provenance", () => {
   it("states the proportion in text", () => {
     act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
     mount("EURUSD");
-    expect(screen.getByText(/2 of 3 bars synthesised/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 of 3 bars from provider history/i)).toBeInTheDocument();
   });
 
-  it("calls a fully synthesised window what it is", () => {
+  it("calls a window of provider history what it is", () => {
     act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
     mount("EURUSD");
-    expect(screen.getByText(/synthesised history/i)).toBeInTheDocument();
+    expect(screen.getByText(/^provider history$/i)).toBeInTheDocument();
   });
 
   it("keeps markers ascending once the boundary is merged in", () => {
     // Lightweight Charts silently misplaces markers given an unsorted list, so
     // the boundary cannot simply be prepended to the alert markers.
     //
-    // The alert is placed INSIDE the synthesised stretch, i.e. earlier than the
+    // The alert is placed INSIDE the backfilled stretch, i.e. earlier than the
     // boundary. That ordering is what makes the bug observable: prepending a
     // late boundary to an early alert yields a descending list. An alert after
     // the boundary would come out sorted either way and prove nothing.

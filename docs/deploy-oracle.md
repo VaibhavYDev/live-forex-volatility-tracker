@@ -1,4 +1,4 @@
-# Deploying the public demo on Oracle Cloud Always Free
+# Deploying on Oracle Cloud Always Free
 
 The target is one Ampere A1 (ARM64) instance running `docker-compose.prod.yml`
 behind Caddy, on a hostname with a real certificate, surviving reboots without
@@ -148,8 +148,13 @@ patch unattended.
 git clone https://github.com/VaibhavYDev/live-forex-volatility-tracker.git
 cd live-forex-volatility-tracker
 echo "FX_DOMAIN=yourname.duckdns.org" > .env
+chmod 600 .env
+${EDITOR:-nano} .env   # add FX_PROVIDER_TOKEN=<your Tiingo API token>
 docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+The stack serves real market data only and will not start without the token.
+The token stays on the server: the browser talks to this API, never to Tiingo.
 
 First build takes ~5 minutes on 2 OCPUs — it compiles Python wheels for ARM and
 runs a Vite production build.
@@ -186,15 +191,6 @@ docker compose -f docker-compose.prod.yml restart ingestor
 ```
 
 The standby promotes within the lease TTL and the dashboard keeps streaming.
-
-**Reset the chart.** Bars accumulate in Redis forever, so after months the
-window fills with synthetic history and one enormous restart gap. Before
-screenshotting or linking it anywhere:
-
-```bash
-docker compose -f docker-compose.prod.yml down -v
-docker compose -f docker-compose.prod.yml up -d
-```
 
 **Update after a push:**
 

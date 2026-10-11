@@ -119,8 +119,8 @@ class FaultServer:
                             1_000_000,
                             round(price - 0.00005, 6),
                             round(price, 6),
-                            round(price + 0.00005, 6),
                             1_000_000,
+                            round(price + 0.00005, 6),
                         ],
                     }
                 )

@@ -67,15 +67,17 @@ class MarketDataProvider(abc.ABC):
     async def close(self) -> None:
         """Idempotent. Must be safe to call on an already-dead connection."""
 
-    async def backfill(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
-        """Fetch bars for a detected gap.
+    async def backfill(
+        self, symbol: str, start: datetime, end: datetime, interval: str = "1m"
+    ) -> list[Bar]:
+        """Fetch the provider's own bars of ``interval`` ("1m" or "1d").
 
         Default is "no backfill available" rather than an exception, so a provider
         without a REST history endpoint still works - the gap is simply recorded
         as missing instead of silently interpolated. Never invent data to fill a
         hole; ``BarSource.BACKFILL`` exists so the UI can show the difference.
         """
-        _ = (symbol, start, end)
+        _ = (symbol, start, end, interval)
         return []
 
     async def __aenter__(self) -> MarketDataProvider:

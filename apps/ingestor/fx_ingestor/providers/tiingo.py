@@ -5,8 +5,8 @@ Endpoint: ``wss://api.tiingo.com/fx``  (free plan includes the firehose)
 The wire format is a **positional array**, which is exactly why this class exists:
 
     {"service": "fx", "messageType": "A",
-     "data": ["Q", "eurusd", "2026-08-22T09:00:00.123Z", bidSize, bid, mid, ask, askSize]}
-              0     1         2                          3        4    5    6    7
+     "data": ["Q", "eurusd", "2026-08-22T09:00:00.123Z", bidSize, bid, mid, askSize, ask]}
+              0     1         2                          3        4    5    6        7
 
 Positional payloads are brittle by construction - the provider can insert a field
 and every naive consumer silently misreads every price after it. So we validate
@@ -22,6 +22,7 @@ quiet market from a dead socket. See ``fx_ingestor.supervisor``.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
@@ -43,6 +44,7 @@ REST_URL = "https://api.tiingo.com/tiingo/fx/{symbol}/prices"
 
 _QUOTE = "Q"
 _EXPECTED_FIELDS = 8
+_RESAMPLE = {"1m": "1min", "1d": "1day"}
 
 
 class TiingoProvider(MarketDataProvider):
@@ -139,11 +141,16 @@ class TiingoProvider(MarketDataProvider):
             tick = Tick(
                 symbol=str(data[1]).upper(),
                 bid=float(data[4]),
-                ask=float(data[6]),
+                ask=float(data[7]),
                 ts_event=ts_event,
                 ts_ingest=datetime.now(UTC),
             )
             tick.validate()
+            # The frame carries its own mid: a field read from the wrong position
+            # disagrees with it, where reading askSize as the ask once passed every
+            # other check and stored USDJPY at 500079.
+            if not math.isclose(tick.mid, float(data[5]), rel_tol=1e-5):
+                raise ValueError(f"mid {data[5]} disagrees with bid {tick.bid} / ask {tick.ask}")
         except (TypeError, ValueError) as exc:
             self.dropped_frames += 1
             log.debug("tiingo.malformed_frame", error=str(exc))
@@ -151,7 +158,9 @@ class TiingoProvider(MarketDataProvider):
 
         return tick
 
-    async def backfill(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
+    async def backfill(
+        self, symbol: str, start: datetime, end: datetime, interval: str = "1m"
+    ) -> list[Bar]:
         """Fill a detected gap from the REST history endpoint.
 
         Everything returned is tagged ``BarSource.BACKFILL`` so the chart can
@@ -161,21 +170,32 @@ class TiingoProvider(MarketDataProvider):
         params = {
             "startDate": start.date().isoformat(),
             "endDate": end.date().isoformat(),
-            "resampleFreq": "1min",
-            "token": self._token,
+            "resampleFreq": _RESAMPLE[interval],
         }
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(REST_URL.format(symbol=symbol.lower()), params=params)
+        # A header, not a query parameter: request URLs end up in HTTP client logs.
+        headers = {"Authorization": f"Token {self._token}"}
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(
+                    REST_URL.format(symbol=symbol.lower()), params=params, headers=headers
+                )
             if resp.status_code == httpx.codes.UNAUTHORIZED:
                 raise ProviderAuthError("tiingo rejected the token on the REST endpoint")
             resp.raise_for_status()
             rows = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ProviderError(f"tiingo history unavailable: {exc}") from exc
 
         bars: list[Bar] = []
         for row in rows:
             try:
                 bucket = datetime.fromisoformat(str(row["date"]).replace("Z", "+00:00"))
-            except (KeyError, ValueError):
+                o, h, low, c = (float(row[k]) for k in ("open", "high", "low", "close"))
+            except (KeyError, TypeError, ValueError):
+                self.dropped_frames += 1
+                continue
+            if not (math.isfinite(h) and 0.0 < low <= min(o, c) <= max(o, c) <= h):
+                self.dropped_frames += 1
                 continue
             if not start <= bucket <= end:
                 continue
@@ -183,15 +203,15 @@ class TiingoProvider(MarketDataProvider):
                 Bar(
                     symbol=symbol.upper(),
                     bucket=bucket,
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
+                    open=o,
+                    high=h,
+                    low=low,
+                    close=c,
                     tick_count=0,  # unknown from OHLC-only history; honest zero
                     sum_ret=0.0,
                     sum_ret_sq=0.0,
                     source=BarSource.BACKFILL,
                 )
             )
-        log.info("tiingo.backfilled", symbol=symbol, bars=len(bars), start=start, end=end)
+        log.info("tiingo.backfilled", symbol=symbol, interval=interval, bars=len(bars))
         return bars

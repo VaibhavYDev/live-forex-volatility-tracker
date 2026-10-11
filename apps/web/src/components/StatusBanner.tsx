@@ -73,8 +73,9 @@ export function StatusBanner() {
     tone = "bad";
     label = "Feed stopped";
     detail = "ingestor shut down" + heldFor;
-  } else if (feed.state === "unknown") {
-    // No status yet, or the server has none to give: not an outage, not Live.
+  } else if (feed.state !== "healthy") {
+    // No status yet, a socket still waiting for its first real quote, or a state
+    // this build does not know: not an outage, and not a verified live feed.
     tone = "warn";
     label = "Waiting for feed";
     detail = feed.detail ?? "";

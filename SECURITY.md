@@ -26,7 +26,8 @@ defaults intact.
 | Ticket lifetime | 30 s, single use | Redeemed with `GETDEL`, so a replay finds nothing |
 | REST rate limit | 30 req/min per client on the estimator endpoint | The only endpoint that does real work per request |
 | CORS | `http://localhost:5173` | Must be set explicitly for any other origin |
-| Redis / PostgreSQL | no external ports in production compose | The demo compose file publishes them for inspection; do not copy it to a server |
+| Redis / PostgreSQL | no external ports in production compose | The local compose file publishes them for inspection; do not copy it to a server |
+| Market-data token | server-side only | Read from `.env` by the ingestor; sent to Tiingo in a header, never in a URL, a log line or the browser bundle |
 
 ### Known limitations — deliberate, and listed rather than hidden
 

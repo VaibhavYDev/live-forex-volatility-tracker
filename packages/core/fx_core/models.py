@@ -49,6 +49,11 @@ class Estimator(StrEnum):
     YANG_ZHANG = "yang_zhang"
 
 
+# No traded FX quote is this wide; a quote that is has a size or another field
+# read as a price.
+MAX_SPREAD_FRACTION = 0.05
+
+
 @dataclass(frozen=True, slots=True)
 class Tick:
     """A single top-of-book update, normalised across providers."""
@@ -89,6 +94,8 @@ class Tick:
             raise ValueError(f"non-positive price: bid={self.bid} ask={self.ask}")
         if self.ask < self.bid:
             raise ValueError(f"crossed book: bid={self.bid} > ask={self.ask}")
+        if self.spread > MAX_SPREAD_FRACTION * self.mid:
+            raise ValueError(f"implausible spread: bid={self.bid} ask={self.ask}")
         if self.ts_event.tzinfo is None:
             raise ValueError("ts_event must be timezone-aware")
 

@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from fx_core import keys
+from fx_core.models import Tick
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import Ingestor
 
@@ -62,7 +64,9 @@ class FakeRedis:
 def build(monkeypatch: pytest.MonkeyPatch) -> tuple[Ingestor, FakeRedis]:
     fake = FakeRedis()
     monkeypatch.setattr("fx_ingestor.main.make_redis", lambda _url: fake)
-    ing = Ingestor(IngestorSettings(FX_PROVIDER="replay", FX_SYMBOLS="EURUSD"))
+    ing = Ingestor(
+        IngestorSettings(FX_PROVIDER="tiingo", FX_PROVIDER_TOKEN="t", FX_SYMBOLS="EURUSD")
+    )
     ing.redis = fake  # type: ignore[assignment]
     return ing, fake
 
@@ -210,3 +214,44 @@ class TestSince:
 
         for _k, body, _ex in fake.sets:
             assert json.loads(body)["since"] == pinned
+
+
+class OneSessionProvider:
+    """Connects, yields the given ticks, then closes."""
+
+    received_frames = dropped_frames = 0
+
+    def __init__(self, ticks: list[Tick]) -> None:
+        self.ticks = ticks
+
+    async def __aenter__(self) -> OneSessionProvider:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def stream(self) -> AsyncIterator[Tick]:
+        for tick in self.ticks:
+            yield tick
+
+
+async def test_only_a_real_quote_makes_the_feed_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open socket on a closed market, or a silent one, is not a live feed."""
+    ing, fake = build(monkeypatch)
+
+    async def handle(_tick: Tick) -> None:
+        return None
+
+    monkeypatch.setattr(ing.pipeline, "handle", handle)
+    now = datetime.now(UTC)
+    quote = Tick(symbol="EURUSD", bid=1.0842, ask=1.0843, ts_event=now, ts_ingest=now)
+
+    for ticks in ([], [quote]):
+        ing._build_provider = lambda t=ticks: OneSessionProvider(t)  # type: ignore[assignment,method-assign,misc]
+        await ing._consume_once()
+
+    states = [json.loads(body)["state"] for _channel, body in fake.published]
+    assert states == ["connecting", "connecting", "healthy"]
