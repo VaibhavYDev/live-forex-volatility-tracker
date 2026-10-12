@@ -53,6 +53,8 @@ The `${...}` values in `docker-compose.yml` (only the `POSTGRES_*` defaults) are
 then read from the pointer. To read them from the settings file too, set
 `COMPOSE_ENV_FILES=.env,C:/path/to/fx.env` with `.env` first: the settings file
 alone makes Compose skip the pointer, and the services start without a token.
+Adding the same `FX_ENV_FILE=` line to the settings file itself closes that gap,
+since then either file leads Compose to the settings.
 Marking the pointer read-only also stops an older, overwriting copy of the
 quickstart from replacing it.
 
