@@ -7,7 +7,7 @@ most projects.
 ## The short version
 
 ```bash
-cp .env.example .env          # then set FX_PROVIDER_TOKEN
+cp -n .env.example .env       # never replaces an existing .env; then set FX_PROVIDER_TOKEN
 docker compose up -d          # Redis, TimescaleDB, ingestor, worker, API, web
 open http://localhost:5173
 ```

@@ -17,6 +17,7 @@ runs in the unit tier because it needs no services - only the file.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,30 @@ def test_prometheus_scrapes_every_ingestor_replica(compose: dict[str, Any]) -> N
         "the ingestor is scaled, so it needs DNS service discovery rather than a static target"
     )
     assert "static_configs" not in jobs["ingestor"]
+
+
+def test_no_setup_instruction_replaces_an_existing_env() -> None:
+    """A quickstart pasted into an existing checkout replaced the .env there.
+
+    `cp .env.example .env` overwrites without asking, and in PowerShell `cp` is
+    Copy-Item, which does the same. The next `docker compose up -d` recreated the
+    services from the copy, without a token. `cp -n` never overwrites (and fails
+    outright in PowerShell), so pasting the quickstart again is harmless.
+    """
+    for name in ("README.md", "CONTRIBUTING.md", "docker-compose.yml"):
+        for n, line in enumerate((COMPOSE.parent / name).read_text().splitlines(), 1):
+            assert not re.search(r"\bcp\s+\.env\.example\s+\.env\b", line), (
+                f"{name}:{n} would overwrite an existing .env: {line.strip()}"
+            )
+
+
+def test_the_services_read_their_settings_through_fx_env_file(
+    compose: dict[str, Any],
+) -> None:
+    # The pointer in a checkout's .env is what keeps the token outside the tree
+    # and survives a plain `docker compose up` from a fresh shell.
+    for name in ("ingestor", "worker", "api"):
+        assert compose["services"][name]["env_file"] == ["${FX_ENV_FILE:-.env}"]
 
 
 # ---------------------------------------------------------------- prod profile

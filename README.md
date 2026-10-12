@@ -30,13 +30,31 @@ measured, it says so.
 ## Run it
 
 ```bash
-git clone https://github.com/<you>/live-forex-volatility-tracker
+git clone https://github.com/VaibhavYDev/live-forex-volatility-tracker
 cd live-forex-volatility-tracker
-cp .env.example .env   # then set FX_PROVIDER_TOKEN (a Tiingo API token)
+cp -n .env.example .env   # -n: never replaces an existing .env; then set FX_PROVIDER_TOKEN (a Tiingo API token)
 docker compose up -d
 ```
 
-Then open <http://localhost:5173>.
+Then open <http://localhost:5173>. In PowerShell, create the file with
+`if (-not (Test-Path .env)) { Copy-Item .env.example .env }`: a plain `cp`
+there is `Copy-Item`, which overwrites an existing `.env` without asking.
+
+**Keeping the token outside the checkout.** `.env` can instead be one line that
+points at a settings file kept anywhere else, holding everything `.env.example`
+lists. Every plain `docker compose` command in the checkout then hands that file
+to the services, from any shell:
+
+```bash
+FX_ENV_FILE=C:/path/to/fx.env
+```
+
+The `${...}` values in `docker-compose.yml` (only the `POSTGRES_*` defaults) are
+then read from the pointer. To read them from the settings file too, set
+`COMPOSE_ENV_FILES=.env,C:/path/to/fx.env` with `.env` first: the settings file
+alone makes Compose skip the pointer, and the services start without a token.
+Marking the pointer read-only also stops an older, overwriting copy of the
+quickstart from replacing it.
 
 Only real market data is shown. There is no simulated feed and no fallback to
 one: without `FX_PROVIDER_TOKEN` the ingestor exits and the dashboard reports no

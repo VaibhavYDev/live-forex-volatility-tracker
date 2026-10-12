@@ -1,7 +1,7 @@
 # =============================================================================
 # Real market data only:
 #
-#     cp .env.example .env   # then set FX_PROVIDER_TOKEN
+#     cp -n .env.example .env   # never replaces an existing .env; then set FX_PROVIDER_TOKEN
 #     docker compose up
 #
 # Without a token the ingestor exits with EX_CONFIG (78) and the dashboard reports
@@ -14,8 +14,9 @@ x-python: &python
   build:
     context: .
     dockerfile: infra/docker/Dockerfile.python
-  # FX_ENV_FILE selects another .env. Point COMPOSE_ENV_FILES (or --env-file)
-  # at the same file so ${...} interpolation reads it too.
+  # FX_ENV_FILE selects another settings file; set it in this checkout's .env to
+  # keep credentials outside the tree. COMPOSE_ENV_FILES, if set, must list .env
+  # first, or the pointer is skipped and the services start without a token.
   env_file: ["${FX_ENV_FILE:-.env}"]
   environment:
     REDIS_URL: redis://redis:6379/0
