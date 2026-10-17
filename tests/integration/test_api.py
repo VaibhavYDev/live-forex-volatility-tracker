@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,14 @@ from fx_api.routers.market import _Cache, _compare_cache
 from fx_api.ws.manager import ConnectionManager
 from fx_core import keys
 from fx_core.intervals import INTERVALS, ORDER
+from fx_core.models import Bar, BarSource, bars_per_year
+from fx_core.volatility import (
+    close_to_close,
+    garman_klass,
+    parkinson,
+    rogers_satchell,
+    yang_zhang,
+)
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import REDIS_URL
@@ -196,6 +205,7 @@ class TestMarketRest:
         body = client.get(f"/api/volatility/{SYMBOL}?estimator=parkinson").json()
         assert body["estimator"] == "parkinson"
         assert body["window_s"] == body["bars_used"] * 60
+        assert body["missing_minutes"] == body["gap_returns"] == 0
         assert "362,880" in body["annualization_basis"]
         assert body["sigma_annualized"] > 0
 
@@ -212,6 +222,70 @@ class TestMarketRest:
             "yang_zhang",
         }
         assert all(v > 0 for v in body["estimators"].values())
+
+    def test_the_window_reports_what_the_bars_actually_span(
+        self, client: TestClient, redis_sync: Any
+    ) -> None:
+        """Bars are not consecutive minutes when some minutes have no bar.
+
+        Friday 2026-10-16: four bars before the 21:00 UTC close with one minute
+        missing, then two flat prints after it - the shape Tiingo serves. The
+        window was reported as bars x 60 s. The figures themselves must not move.
+        """
+        close = datetime(2026, 10, 16, 21, 0, tzinfo=UTC)
+        rows = [
+            (-10, 1.1000, 1.1004, 1.0998, 1.1002),
+            (-9, 1.1002, 1.1006, 1.1001, 1.1005),
+            (-7, 1.1004, 1.1007, 1.1003, 1.1006),
+            (-6, 1.1006, 1.1009, 1.1004, 1.1008),
+            (5, 1.1008, 1.1008, 1.1008, 1.1008),
+            (13, 1.1007, 1.1007, 1.1007, 1.1007),
+        ]
+        bars = [
+            Bar(
+                symbol=SYMBOL,
+                bucket=close + timedelta(minutes=m),
+                open=o,
+                high=h,
+                low=low,
+                close=c,
+                tick_count=12,
+                sum_ret=0.0,
+                sum_ret_sq=0.0,
+                source=BarSource.BACKFILL,
+            )
+            for m, o, h, low, c in rows
+        ]
+        redis_sync.zadd(
+            keys.history(SYMBOL),
+            {
+                _bar(int(b.bucket.timestamp()), b.open, b.high, b.low, b.close, "backfill"): int(
+                    b.bucket.timestamp()
+                )
+                for b in bars
+            },
+        )
+
+        compare = client.get(f"/api/volatility/{SYMBOL}/compare").json()
+        single = client.get(f"/api/volatility/{SYMBOL}?estimator=yang_zhang").json()
+
+        for body in (compare, single):
+            assert body["bars_used"] == 6
+            assert body["window_s"] == 24 * 60  # 20:50 to the end of the 21:13 bar
+            assert body["missing_minutes"] == 18
+            assert body["gap_returns"] == 3
+            assert body["flat_bars"] == 2
+            assert body["bars_outside_market_hours"] == 2
+        per_year = math.sqrt(bars_per_year(60))
+        for name, fn in {
+            "close_to_close": close_to_close,
+            "parkinson": parkinson,
+            "garman_klass": garman_klass,
+            "rogers_satchell": rogers_satchell,
+            "yang_zhang": yang_zhang,
+        }.items():
+            assert compare["estimators"][name] == pytest.approx(fn(bars) * per_year, rel=1e-12)
+        assert single["sigma_annualized"] == pytest.approx(yang_zhang(bars) * per_year, rel=1e-12)
 
 
 class TestCompareCache:
