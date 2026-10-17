@@ -79,21 +79,26 @@ class TiingoProvider(MarketDataProvider):
                 close_timeout=5,
                 max_queue=1024,
             )
-        except OSError as exc:
+        except (OSError, websockets.InvalidHandshake) as exc:
+            # A timeout during the HTTP upgrade is already an OSError; a socket
+            # that dies mid-upgrade, or a 5xx from Tiingo, is InvalidHandshake.
             raise ProviderError(f"tiingo connect failed: {exc}") from exc
 
-        await self._ws.send(
-            json.dumps(
-                {
-                    "eventName": "subscribe",
-                    "authorization": self._token,
-                    "eventData": {
-                        "thresholdLevel": self._threshold,
-                        "tickers": [s.lower() for s in self.symbols],
-                    },
-                }
+        try:
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "eventName": "subscribe",
+                        "authorization": self._token,
+                        "eventData": {
+                            "thresholdLevel": self._threshold,
+                            "tickers": [s.lower() for s in self.symbols],
+                        },
+                    }
+                )
             )
-        )
+        except websockets.ConnectionClosed as exc:
+            raise ProviderError(self._closed_detail(exc)) from exc
         log.info("tiingo.subscribed", symbols=self.symbols, threshold=self._threshold)
 
     async def close(self) -> None:
@@ -102,14 +107,29 @@ class TiingoProvider(MarketDataProvider):
             self._ws = None
 
     async def stream(self) -> AsyncIterator[Tick]:
-        if self._ws is None:
+        ws = self._ws
+        if ws is None:
             raise ProviderError("stream() called before connect()")
 
-        async for raw in self._ws:
+        # recv(), not ``async for``: the iterator ends silently on a clean close,
+        # which the supervisor would take for a session that went well. And a
+        # websockets exception is not one it retries: a keepalive timeout on a
+        # flaky network used to escape it and take the whole process down.
+        while True:
+            try:
+                raw = await ws.recv()
+            except websockets.ConnectionClosed as exc:
+                raise ProviderError(self._closed_detail(exc)) from exc
             self.received_frames += 1
             tick = self._parse(raw)
             if tick is not None:
                 yield tick
+
+    def _closed_detail(self, exc: websockets.ConnectionClosed) -> str:
+        # The close reason is free text chosen by the other end; nothing promises
+        # it does not echo the subscribe frame, and this string reaches the logs
+        # and the status banner.
+        return f"tiingo connection closed: {exc}".replace(self._token, "<redacted>")
 
     def _parse(self, raw: str | bytes) -> Tick | None:
         """Positional array -> domain Tick. Returns None (and counts) on anything odd."""

@@ -41,8 +41,10 @@ class MarketDataProvider(abc.ABC):
     Contract:
     * ``connect`` may raise ``ProviderError``; the supervisor owns all retry policy,
       so implementations must NOT retry internally. One responsibility each.
-    * ``stream`` yields validated ``Tick`` objects and terminates cleanly when the
-      connection drops - it never raises for an ordinary disconnect.
+    * ``stream`` yields validated ``Tick`` objects until the caller stops reading.
+      A connection that drops or is closed, cleanly or not, raises
+      ``ProviderError`` so the supervisor's retry path owns it. A transport
+      library's own exception escaping ``stream`` ends the process instead.
     * Implementations count their own malformed frames in ``dropped_frames`` rather
       than raising, because one corrupt message must not kill the feed.
     """
@@ -61,7 +63,7 @@ class MarketDataProvider(abc.ABC):
 
     @abc.abstractmethod
     def stream(self) -> AsyncIterator[Tick]:
-        """Yield normalised ticks until the connection closes."""
+        """Yield normalised ticks; raise ProviderError when the connection closes."""
 
     @abc.abstractmethod
     async def close(self) -> None:

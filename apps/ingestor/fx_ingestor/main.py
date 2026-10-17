@@ -182,6 +182,13 @@ class Ingestor:
                 self._shutdown.set()
                 raise
             except (ProviderError, OSError) as exc:
+                # A dropped socket ends almost every session, healthy or not, so a
+                # session that worked first must still reset the ladder. Without
+                # this, drops hours apart on a flaky network would climb it to the
+                # cap and reopen the breaker after every drop past the fifth.
+                if (self._monotonic() - started) >= MIN_HEALTHY_SESSION_S:
+                    self.breaker.record_success()
+                    attempt = 0
                 self.breaker.record_failure()
                 self.pipeline.set_feed_stale(True)
                 await self._publish_status("degraded", str(exc))
