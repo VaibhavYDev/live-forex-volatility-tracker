@@ -81,3 +81,36 @@ describe("estimator comparison across a symbol switch", () => {
     expect(fetch.mock.calls[0]![1].signal.aborted).toBe(true);
   });
 });
+
+describe("estimator window label", () => {
+  const sparse = {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      bars_used: 120,
+      window_s: 231 * 60,
+      missing_minutes: 111,
+      bars_outside_market_hours: 16,
+      annualization_basis: "252d",
+      estimators: { parkinson: 0.0258 },
+    }),
+  };
+
+  it("states the time the bars span, the minutes without a bar and post-close prints", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sparse));
+    render(panel("EURUSD"));
+
+    expect(await screen.findByText(/231 min window/)).toBeInTheDocument();
+    expect(screen.getByText(/111 min without a bar/)).toBeInTheDocument();
+    expect(screen.getByText(/16 bars outside market hours/)).toBeInTheDocument();
+  });
+
+  it("adds nothing when the bars are consecutive minutes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(compare(0.0612)));
+    render(panel("EURUSD"));
+
+    expect(await screen.findByText(/120 min window/)).toBeInTheDocument();
+    expect(screen.queryByText(/without a bar/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/outside market hours/)).not.toBeInTheDocument();
+  });
+});

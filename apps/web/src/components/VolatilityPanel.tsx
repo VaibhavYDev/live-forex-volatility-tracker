@@ -28,7 +28,10 @@ const CAUSE_LABEL: Record<TransitionCause, string> = {
 
 interface CompareResponse {
   bars_used: number;
+  /** First bar's start to last bar's end, not bars x 60. */
   window_s: number;
+  missing_minutes?: number;
+  bars_outside_market_hours?: number;
   annualization_basis: string;
   estimators: Record<string, number>;
 }
@@ -176,6 +179,16 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
               ±{Math.round(100 / Math.sqrt(2 * Math.max(compare.bars_used - 2, 1)))}% sampling error
             </span>{" "}
             · {compare.window_s / 60} min window ·{" "}
+            {!!compare.missing_minutes && (
+              <span title="Minutes in this window with no price update. The estimators treat the bars as consecutive one-minute observations, so the figures describe the minutes that have bars.">
+                {compare.missing_minutes} min without a bar ·{" "}
+              </span>
+            )}
+            {!!compare.bars_outside_market_hours && (
+              <span title="Bars the provider printed while the FX market was closed.">
+                {compare.bars_outside_market_hours} bars outside market hours ·{" "}
+              </span>
+            )}
             {compare.annualization_basis}
           </p>
         </>

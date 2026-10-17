@@ -11,6 +11,7 @@ import json
 import re
 import time
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Any
 
 import structlog
@@ -34,6 +35,7 @@ log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["market"])
 
 _MIN_BARS = 3
+_BAR_SECONDS = 60
 
 # Symbols reach Redis as key fragments and cache keys. Six upper-case letters is
 # every FX pair there is; the bound matters because an unvalidated symbol is an
@@ -133,6 +135,27 @@ async def _bars_from_cache(symbol: str, limit: int) -> list[Bar]:
     ]
 
 
+def _window(rows: list[Bar]) -> dict[str, int]:
+    """What the bars actually span.
+
+    The estimators treat consecutive bars as consecutive minutes and annualise
+    per bar. The provider has no bar for a minute without a price update, and
+    prints sparse bars after the Friday close, so 120 bars can span nearly four
+    hours.
+    These figures say so instead of labelling the window "120 min".
+    """
+    elapsed = int((rows[-1].bucket - rows[0].bucket).total_seconds()) + _BAR_SECONDS
+    return {
+        "window_s": elapsed,
+        "missing_minutes": elapsed // _BAR_SECONDS - len(rows),
+        "gap_returns": sum(
+            (b.bucket - a.bucket).total_seconds() > _BAR_SECONDS for a, b in pairwise(rows)
+        ),
+        "flat_bars": sum(b.open == b.high == b.low == b.close for b in rows),
+        "bars_outside_market_hours": sum(not is_market_open(b.bucket) for b in rows),
+    }
+
+
 @router.get("/market/status")
 async def market_status() -> dict[str, Any]:
     """Is the FX market open, and which regional sessions are live?
@@ -227,18 +250,19 @@ async def volatility(
             ),
         )
 
+    window = _window(rows)
     snap = VolSnapshot.build(
         symbol=sym,
         estimator=estimator,
-        window_s=len(rows) * 60,
+        window_s=window["window_s"],
         sigma=_ESTIMATORS[estimator](rows),
         sample_count=len(rows),
-        bar_seconds=60,
+        bar_seconds=_BAR_SECONDS,
     )
     return {
         "symbol": snap.symbol,
         "estimator": str(snap.estimator),
-        "window_s": snap.window_s,
+        **window,
         "bars_used": snap.sample_count,
         "sigma_per_bar": snap.sigma,
         "sigma_annualized": snap.sigma_annualized,
@@ -286,19 +310,20 @@ async def compare_estimators(
             detail=f"not enough bars cached for {sym} yet ({len(rows)})",
         )
 
+    window = _window(rows)
     payload = {
         "symbol": sym,
         "bars_used": len(rows),
-        "window_s": len(rows) * 60,
+        **window,
         "annualization_basis": ANNUALIZATION_BASIS,
         "estimators": {
             str(est): VolSnapshot.build(
                 symbol=sym,
                 estimator=est,
-                window_s=len(rows) * 60,
+                window_s=window["window_s"],
                 sigma=fn(rows),
                 sample_count=len(rows),
-                bar_seconds=60,
+                bar_seconds=_BAR_SECONDS,
             ).sigma_annualized
             for est, fn in _ESTIMATORS.items()
         },
