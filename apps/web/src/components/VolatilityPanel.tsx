@@ -49,7 +49,8 @@ const NOTES: Record<string, string> = {
   parkinson: "Uses the bar range. ~4.7× more efficient than close-to-close.",
   garman_klass: "Range plus open/close. ~6.6× more efficient. Assumes zero drift.",
   rogers_satchell: "Drift-independent — the one to trust on a trending pair.",
-  yang_zhang: "Gap-aware. FX gaps every Friday 21:00 UTC, so this is the honest default.",
+  yang_zhang:
+    "Separates the jump between bars from movement within them. Assumes equally spaced bars, so it is unreliable when minutes are missing.",
 };
 
 export function VolatilityPanel({ symbol }: { symbol: string }) {
@@ -180,7 +181,7 @@ export function VolatilityPanel({ symbol }: { symbol: string }) {
             </span>{" "}
             · {compare.window_s / 60} min window ·{" "}
             {!!compare.missing_minutes && (
-              <span title="Minutes in this window with no price update. The estimators treat the bars as consecutive one-minute observations, so the figures describe the minutes that have bars.">
+              <span title="Minutes in this window for which no bar was received. The estimators treat the bars as consecutive one-minute observations whatever time separates them, so with minutes missing the figures are not a per-minute measure of this window.">
                 {compare.missing_minutes} min without a bar ·{" "}
               </span>
             )}

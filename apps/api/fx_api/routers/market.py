@@ -139,10 +139,10 @@ def _window(rows: list[Bar]) -> dict[str, int]:
     """What the bars actually span.
 
     The estimators treat consecutive bars as consecutive minutes and annualise
-    per bar. The provider has no bar for a minute without a price update, and
-    prints sparse bars after the Friday close, so 120 bars can span nearly four
-    hours.
-    These figures say so instead of labelling the window "120 min".
+    per bar. Some minutes have no bar (thin trading, provider or feed gaps) and
+    the provider prints sparse bars after the Friday close, so 120 bars can span
+    nearly four hours. These figures describe the window; they say nothing about
+    what happened in the missing minutes.
     """
     elapsed = int((rows[-1].bucket - rows[0].bucket).total_seconds()) + _BAR_SECONDS
     return {

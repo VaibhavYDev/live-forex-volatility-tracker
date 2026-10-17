@@ -226,7 +226,7 @@ class TestMarketRest:
     def test_the_window_reports_what_the_bars_actually_span(
         self, client: TestClient, redis_sync: Any
     ) -> None:
-        """Bars are not minutes when the provider skips quiet ones.
+        """Bars are not consecutive minutes when some minutes have no bar.
 
         Friday 2026-10-16: four bars before the 21:00 UTC close with one minute
         missing, then two flat prints after it - the shape Tiingo serves. The
