@@ -122,6 +122,21 @@ def test_every_service_the_demo_needs_is_in_the_default_profile(
         )
 
 
+def test_every_default_service_comes_back_after_a_reboot(compose: dict[str, Any]) -> None:
+    """Docker restarts only the containers that carry a restart policy.
+
+    The Python services had one through the anchor and ``web`` set its own, but
+    Redis and Timescale had none. After a reboot Docker brought the API, worker
+    and ingestors back and left the datastores exited, so the API failed on a
+    Redis connection timeout and the rest crash-looped until someone ran
+    ``docker start`` on the two of them by hand.
+    """
+    default = {name: svc for name, svc in compose["services"].items() if not svc.get("profiles")}
+    assert {"redis", "timescale"} <= set(default)
+    stays_down = [name for name, svc in default.items() if svc.get("restart") != "unless-stopped"]
+    assert not stays_down, f"{stays_down} would stay down after a reboot"
+
+
 def test_prometheus_scrapes_every_ingestor_replica(compose: dict[str, Any]) -> None:
     """A static target resolves to ONE replica at random on each scrape.
 
