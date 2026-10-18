@@ -19,8 +19,9 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import structlog
 from fx_core import keys
 from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
@@ -35,6 +36,7 @@ from fx_ingestor.providers import (
     ProviderError,
     build_provider,
 )
+from fx_ingestor.recovery import HistoryRecovery, RecoveryConfig, RecoveryStore
 from fx_ingestor.supervisor import BackoffPolicy, CircuitBreaker, StalenessWatchdog
 
 log = structlog.get_logger(__name__)
@@ -257,6 +259,53 @@ class Ingestor:
             except RedisError as exc:
                 log.warning("history.refresh_failed", error=str(exc))
 
+    async def _recover_history(self) -> None:
+        """Fill missed minutes from the provider's history while leading.
+
+        Beside the feed, like the daily refresh: it never delays a tick and never
+        writes the live path (see fx_ingestor.recovery). An unreachable database or
+        Redis only postpones the next run.
+        """
+        if self.cfg.recovery_mode == "off":
+            return
+        await asyncio.sleep(self.cfg.recovery_first_delay_s)
+        pool: asyncpg.Pool | None = None
+        recovery: HistoryRecovery | None = None
+        trigger = "leadership"
+        try:
+            while True:
+                try:
+                    if pool is None:
+                        pool = await asyncpg.create_pool(
+                            self.cfg.database_url, min_size=1, max_size=2, command_timeout=120
+                        )
+                    if recovery is None:
+                        recovery = HistoryRecovery(
+                            store=RecoveryStore(pool, self.redis),
+                            provider=self._build_provider,
+                            provider_name=self.cfg.provider,
+                            symbols=self.cfg.symbol_list,
+                            instance=self.lease.instance_id,
+                            config=RecoveryConfig(
+                                lookback=timedelta(hours=self.cfg.recovery_lookback_h),
+                                # Until the tick stream drops a minute's ticks, the worker
+                                # may still persist it: recover only minutes older than that.
+                                horizon=timedelta(seconds=self.cfg.stream_retention_s + 120),
+                                max_requests=self.cfg.recovery_max_requests,
+                                request_spacing_s=self.cfg.recovery_request_spacing_s,
+                                days_per_request=self.cfg.recovery_days_per_request,
+                            ),
+                            stop=self.lease.lost,
+                        )
+                    await recovery.run_once(trigger, apply=self.cfg.recovery_mode == "apply")
+                    trigger = "periodic"
+                except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, RedisError) as exc:
+                    log.warning("recovery.unavailable", error=str(exc))
+                await asyncio.sleep(self.cfg.recovery_interval_s)
+        finally:
+            if pool is not None:
+                await pool.close()
+
     def _since(self) -> str:
         return self._last_status.get("since", self._last_status.get("ts", ""))
 
@@ -299,6 +348,7 @@ class Ingestor:
                 # whole of the N-replica story: only the lease holder connects.
                 async with self.lease.hold():
                     refresher: asyncio.Task[None] | None = None
+                    recovery: asyncio.Task[None] | None = None
                     try:
                         # Rehydrate BEFORE the first tick. A standby that starts
                         # cold re-baselines on whatever the market is doing right
@@ -307,8 +357,16 @@ class Ingestor:
                         # stored 'stressed' row is waiting for.
                         await self._rehydrate()
                         refresher = asyncio.create_task(self._refresh_daily_history())
+                        recovery = asyncio.create_task(
+                            self._recover_history(), name="history-recovery"
+                        )
+                        recovery.add_done_callback(_report_recovery_failure)
                         await self._run_as_leader()
                     finally:
+                        if recovery is not None:
+                            recovery.cancel()
+                            # A failure was logged when it happened; it must not end the feed.
+                            await asyncio.gather(recovery, return_exceptions=True)
                         if refresher is not None:
                             refresher.cancel()
                             with contextlib.suppress(asyncio.CancelledError):
@@ -329,6 +387,12 @@ class Ingestor:
     def request_shutdown(self) -> None:
         log.info("shutdown.requested")
         self._shutdown.set()
+
+
+def _report_recovery_failure(task: asyncio.Task[None]) -> None:
+    """A defect in recovery stops recovery, loudly, and leaves the live feed running."""
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        log.error("recovery.crashed", error=repr(exc), exc_info=exc)
 
 
 async def main() -> None:

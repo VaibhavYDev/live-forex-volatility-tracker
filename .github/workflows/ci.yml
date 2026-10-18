@@ -62,6 +62,7 @@ jobs:
             "SELECT 'timescaledb ' || default_version FROM pg_available_extensions WHERE name = 'timescaledb'"
           psql -h localhost -U fx -d fx -v ON_ERROR_STOP=1 -f infra/migrations/001_init.sql
           psql -h localhost -U fx -d fx -v ON_ERROR_STOP=1 -f infra/migrations/003_alert_events.sql
+          psql -h localhost -U fx -d fx -v ON_ERROR_STOP=1 -f infra/migrations/004_history_recovery.sql
 
       - name: Tests
         env:

@@ -34,7 +34,9 @@ from fx_core.models import Bar, BarSource, Tick
 from fx_ingestor.providers.base import (
     MarketDataProvider,
     ProviderAuthError,
+    ProviderEntitlementError,
     ProviderError,
+    ProviderRateLimitError,
 )
 
 log = structlog.get_logger(__name__)
@@ -48,6 +50,15 @@ _RESAMPLE = {"1m": "1min", "1d": "1day"}
 # Tiingo serves FX history from this date and rejects an earlier startDate with
 # HTTP 400, which would lose the whole request rather than just the older part.
 _HISTORY_START = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+def _retry_after(header: str | None) -> float | None:
+    """Seconds from a Retry-After header, when it is the delta-seconds form."""
+    try:
+        seconds = float(header) if header is not None else None
+    except ValueError:
+        return None  # the HTTP-date form: no hint rather than a wrong one
+    return seconds if seconds is not None and seconds >= 0 else None
 
 
 class TiingoProvider(MarketDataProvider):
@@ -205,6 +216,16 @@ class TiingoProvider(MarketDataProvider):
                 )
             if resp.status_code == httpx.codes.UNAUTHORIZED:
                 raise ProviderAuthError("tiingo rejected the token on the REST endpoint")
+            if resp.status_code == httpx.codes.FORBIDDEN:
+                # A valid token without the entitlement. Asking again will not help.
+                raise ProviderEntitlementError(
+                    "tiingo history unavailable: HTTP 403, this account may not read it"
+                )
+            if resp.status_code == httpx.codes.TOO_MANY_REQUESTS:
+                raise ProviderRateLimitError(
+                    "tiingo rate-limited the history request (HTTP 429)",
+                    retry_after_s=_retry_after(resp.headers.get("Retry-After")),
+                )
             resp.raise_for_status()
             rows = resp.json()
         except (httpx.HTTPError, ValueError) as exc:

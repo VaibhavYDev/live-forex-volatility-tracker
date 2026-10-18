@@ -19,7 +19,13 @@ from datetime import datetime
 
 from fx_core.models import Bar, Tick
 
-__all__ = ["MarketDataProvider", "ProviderAuthError", "ProviderError"]
+__all__ = [
+    "MarketDataProvider",
+    "ProviderAuthError",
+    "ProviderEntitlementError",
+    "ProviderError",
+    "ProviderRateLimitError",
+]
 
 
 class ProviderError(RuntimeError):
@@ -33,6 +39,28 @@ class ProviderAuthError(ProviderError):
     key banned. The supervisor treats this as fatal and exits loudly instead of
     entering an infinite backoff loop that looks healthy in a dashboard.
     """
+
+
+class ProviderEntitlementError(ProviderError):
+    """The credentials work, but this account may not read what was asked for (HTTP 403).
+
+    Recoverable for the feed - the live stream does not depend on it - so it is
+    a plain ProviderError, not an auth failure. History recovery stops asking for
+    that symbol for a while rather than repeating a request that cannot succeed.
+    """
+
+
+class ProviderRateLimitError(ProviderError):
+    """The provider asked us to slow down (HTTP 429).
+
+    Still a ProviderError, so anything that already retries those keeps doing
+    so; history recovery stops its run instead and waits ``retry_after_s`` (the
+    provider's hint, when it gives one) before asking again.
+    """
+
+    def __init__(self, message: str, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class MarketDataProvider(abc.ABC):
