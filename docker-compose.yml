@@ -41,6 +41,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # Same policy as everything that depends on it. Without one, Docker brings
+    # the Python services back after a reboot but leaves this exited, and they
+    # crash-loop on a connection timeout until it is started by hand.
+    restart: unless-stopped
 
   timescale:
     # Full TimescaleDB (TSL), so continuous aggregates, native compression and
@@ -67,6 +71,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
 
   # --------------------------------------------------------------- services --
   ingestor:
