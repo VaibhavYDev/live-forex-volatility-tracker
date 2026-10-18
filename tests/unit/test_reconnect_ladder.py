@@ -38,6 +38,7 @@ import random
 import pytest
 from fx_ingestor.config import IngestorSettings
 from fx_ingestor.main import MIN_HEALTHY_SESSION_S, Ingestor
+from fx_ingestor.providers import ProviderError
 from fx_ingestor.supervisor import BreakerState
 
 
@@ -87,6 +88,22 @@ async def _drive(ing: Ingestor, session_s: float, rounds: int, clock: FakeClock)
         clock.advance(session_s)
         if calls >= rounds:
             ing._shutdown.set()
+
+    ing._consume_once = consume  # type: ignore[method-assign]
+    await ing._run_as_leader()
+
+
+async def _drive_drops(ing: Ingestor, session_s: float, rounds: int, clock: FakeClock) -> None:
+    """Run N sessions that each end in a dropped socket after `session_s`."""
+    calls = 0
+
+    async def consume() -> None:
+        nonlocal calls
+        calls += 1
+        clock.advance(session_s)
+        if calls >= rounds:
+            ing._shutdown.set()
+        raise ProviderError("tiingo connection closed: sent 1011 (internal error)")
 
     ing._consume_once = consume  # type: ignore[method-assign]
     await ing._run_as_leader()
@@ -160,3 +177,39 @@ async def test_a_healthy_session_closes_the_breaker(monkeypatch: pytest.MonkeyPa
 
     await _drive(ing, session_s=MIN_HEALTHY_SESSION_S * 2, rounds=2, clock=clock)
     assert ing.breaker.state is BreakerState.CLOSED
+
+
+async def test_drops_after_healthy_sessions_do_not_climb_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped socket now ends sessions through the failure path, healthy or not.
+
+    That path never reset the ladder, so on a network that drops the socket every
+    hour or so, ten good hours would climb it to the cap and reopen the breaker on
+    every drop after the fifth: up to a minute of backoff plus thirty seconds
+    of "circuit breaker open" for each one.
+    """
+    clock = FakeClock()
+    ing, slept = build(monkeypatch, clock)
+
+    await _drive_drops(ing, session_s=3_600.0, rounds=10, clock=clock)
+
+    assert len(slept) == 10
+    assert all(d <= ing.backoff.base_s for d in slept)
+    assert ing.breaker.state is BreakerState.CLOSED
+    assert ing.breaker.failures == 1
+
+
+async def test_drops_that_end_short_sessions_still_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reset is earned by the session, not by the drop."""
+    clock = FakeClock()
+    ing, slept = build(monkeypatch, clock)
+    ing.breaker.fail_threshold = 3
+    ing.breaker.reset_after_s = 0.0  # the reset window runs on the real clock
+
+    await _drive_drops(ing, session_s=0.01, rounds=8, clock=clock)
+
+    assert sum(slept) > 5 * ing.backoff.base_s
+    assert ing.breaker.state is BreakerState.OPEN

@@ -182,6 +182,13 @@ class Ingestor:
                 self._shutdown.set()
                 raise
             except (ProviderError, OSError) as exc:
+                # A dropped socket ends almost every session, healthy or not, so a
+                # session that worked first must still reset the ladder. Without
+                # this, drops hours apart on a flaky network would climb it to the
+                # cap and reopen the breaker after every drop past the fifth.
+                if (self._monotonic() - started) >= MIN_HEALTHY_SESSION_S:
+                    self.breaker.record_success()
+                    attempt = 0
                 self.breaker.record_failure()
                 self.pipeline.set_feed_stale(True)
                 await self._publish_status("degraded", str(exc))
@@ -291,26 +298,32 @@ class Ingestor:
                 # Standby replicas block here until the leader dies. This is the
                 # whole of the N-replica story: only the lease holder connects.
                 async with self.lease.hold():
-                    # Rehydrate BEFORE the first tick. A standby that starts
-                    # cold re-baselines on whatever the market is doing right
-                    # now - so if it is promoted mid-crisis it learns the crisis
-                    # as "normal", reports NORMAL, and never emits the clear the
-                    # stored 'stressed' row is waiting for.
-                    await self._rehydrate()
-                    refresher = asyncio.create_task(self._refresh_daily_history())
+                    refresher: asyncio.Task[None] | None = None
                     try:
+                        # Rehydrate BEFORE the first tick. A standby that starts
+                        # cold re-baselines on whatever the market is doing right
+                        # now - so if it is promoted mid-crisis it learns the crisis
+                        # as "normal", reports NORMAL, and never emits the clear the
+                        # stored 'stressed' row is waiting for.
+                        await self._rehydrate()
+                        refresher = asyncio.create_task(self._refresh_daily_history())
                         await self._run_as_leader()
                     finally:
-                        refresher.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await refresher
+                        if refresher is not None:
+                            refresher.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await refresher
+                        # Said while the lease is still ours. From a standby, or once
+                        # the lease has passed on, "stopped" would contradict the
+                        # replica that now owns the feed.
+                        if not self.lease.lost.is_set():
+                            await self._publish_status("stopped")
                 if self.lease.lost.is_set() and not self._shutdown.is_set():
                     log.warning("leadership.lost_reentering_standby")
         finally:
             depth.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await depth
-            await self._publish_status("stopped")
             await close_redis(self.redis)
 
     def request_shutdown(self) -> None:
@@ -329,12 +342,31 @@ async def main() -> None:
     )
 
     ingestor = Ingestor(cfg)
+    work = asyncio.create_task(ingestor.run(), name="ingestor")
+    requested = False
+
+    def stop() -> None:
+        nonlocal requested
+        requested = True
+        ingestor.request_shutdown()
+        # The flag alone is not enough. A standby polling for the lease, a backoff
+        # sleep and a socket with nothing to say - all weekend, while the market is
+        # closed - never look at it, and Docker kills the process ten seconds after
+        # SIGTERM. Cancelling unwinds each of them through the same finally blocks:
+        # status published, lease released, Redis closed.
+        work.cancel()
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, ingestor.request_shutdown)
+            loop.add_signal_handler(sig, stop)
 
-    await ingestor.run()
+    try:
+        await work
+    except asyncio.CancelledError:
+        # Our own cancel, on request, is the clean exit. Any other is not ours to swallow.
+        if not requested:
+            raise
 
 
 def run() -> None:
