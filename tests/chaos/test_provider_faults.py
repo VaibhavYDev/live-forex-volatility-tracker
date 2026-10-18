@@ -12,7 +12,10 @@ import contextlib
 
 import pytest
 import websockets
-from fx_ingestor.providers.base import ProviderAuthError
+from fx_core.models import Tick
+from fx_ingestor.config import IngestorSettings
+from fx_ingestor.main import Ingestor
+from fx_ingestor.providers.base import ProviderAuthError, ProviderError
 from fx_ingestor.providers.tiingo import TiingoProvider
 from fx_ingestor.supervisor import StalenessWatchdog
 
@@ -24,12 +27,18 @@ pytestmark = pytest.mark.chaos
 class _PatchedTiingo(TiingoProvider):
     """Tiingo adapter pointed at the local fault server instead of the real one."""
 
-    def __init__(self, url: str, symbols: list[str]) -> None:
+    def __init__(self, url: str, symbols: list[str], keepalive_s: float | None = None) -> None:
         super().__init__(symbols, token="test-token")
         self._url = url
+        self._keepalive_s = keepalive_s
 
     async def connect(self) -> None:
-        self._ws = await websockets.connect(self._url, ping_interval=None)
+        self._ws = await websockets.connect(
+            self._url,
+            ping_interval=self._keepalive_s,
+            ping_timeout=self._keepalive_s,
+            close_timeout=self._keepalive_s or 10,  # 10 is websockets' default
+        )
         await self._ws.send('{"eventName":"subscribe"}')
 
 
@@ -45,9 +54,28 @@ async def _drain(provider: _PatchedTiingo, limit: int, budget_s: float = 5.0) ->
     # Suppress ONLY the two outcomes that mean "the connection ended", never
     # bare Exception - a broad catch here would hide the very parser crashes
     # these tests exist to detect.
-    with contextlib.suppress(TimeoutError, websockets.ConnectionClosed):
+    try:
         await asyncio.wait_for(collect(), timeout=budget_s)
+    except TimeoutError:
+        pass
+    except ProviderError as exc:
+        if not isinstance(exc.__cause__, websockets.ConnectionClosed):
+            raise
     return ticks
+
+
+async def _read_until_closed(
+    provider: _PatchedTiingo, budget_s: float = 5.0
+) -> tuple[list[object], ProviderError]:
+    ticks: list[object] = []
+
+    async def collect() -> None:
+        async for tick in provider.stream():
+            ticks.append(tick)
+
+    with pytest.raises(ProviderError) as caught:
+        await asyncio.wait_for(collect(), timeout=budget_s)
+    return ticks, caught.value
 
 
 async def test_malformed_frames_are_dropped_not_fatal() -> None:
@@ -69,20 +97,100 @@ async def test_malformed_frames_are_dropped_not_fatal() -> None:
         tick.validate()  # type: ignore[attr-defined]
 
 
-async def test_connection_drop_terminates_the_stream_cleanly() -> None:
-    """A dropped socket ends the iterator; it does not raise into the caller.
+async def test_a_connection_drop_raises_provider_error() -> None:
+    """A dropped socket ends the stream with ProviderError, never websockets' own.
 
-    That contract is what lets the supervisor own ALL retry policy - one place
+    ProviderError is what lets the supervisor own ALL retry policy - one place
     that decides when to reconnect, rather than retry logic smeared across every
-    provider adapter.
+    provider adapter. This test used to suppress ConnectionClosed and so passed
+    while that exception escaped the supervisor and ended the process.
     """
     async with fault_server(FaultConfig(drop_after_frames=15, frames_per_second=500)) as server:
         provider = _PatchedTiingo(server.url, ["EURUSD"])
         await provider.connect()
-        ticks = await _drain(provider, limit=10_000, budget_s=5.0)
+        ticks, error = await _read_until_closed(provider)
         await provider.close()
 
     assert 10 <= len(ticks) <= 20
+    assert type(error) is ProviderError
+    assert isinstance(error.__cause__, websockets.ConnectionClosedError)
+
+
+async def test_a_clean_server_close_raises_provider_error() -> None:
+    """websockets' iterator swallows a clean close; the adapter must not.
+
+    Ending quietly read to the supervisor as a session that went well, so it
+    reported "healthy" through the backoff that followed.
+    """
+    async with fault_server(
+        FaultConfig(close_cleanly_after_frames=15, frames_per_second=500)
+    ) as server:
+        provider = _PatchedTiingo(server.url, ["EURUSD"])
+        await provider.connect()
+        ticks, error = await _read_until_closed(provider)
+        await provider.close()
+
+    assert len(ticks) == 15
+    assert type(error) is ProviderError
+    assert isinstance(error.__cause__, websockets.ConnectionClosedOK)
+
+
+async def test_a_keepalive_timeout_raises_provider_error() -> None:
+    """The production failure: the link dies, pings go unanswered, 1011."""
+    async with fault_server(FaultConfig(go_dark_after_frames=5, frames_per_second=500)) as server:
+        provider = _PatchedTiingo(server.url, ["EURUSD"], keepalive_s=0.1)
+        await provider.connect()
+        ticks, error = await _read_until_closed(provider)
+        await provider.close()
+
+    assert len(ticks) == 5
+    assert type(error) is ProviderError
+    assert "keepalive ping timeout" in str(error)
+
+
+async def test_the_supervisor_rides_out_keepalive_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real sockets, real keepalive, the real leader loop: it reconnects in-process.
+
+    Before the fix the first timeout raised out of ``_run_as_leader`` and the
+    container restarted.
+    """
+    monkeypatch.setattr("fx_ingestor.main.make_redis", lambda _url: None)
+    ing = Ingestor(
+        IngestorSettings(
+            FX_PROVIDER="tiingo",
+            FX_PROVIDER_TOKEN="test-token",
+            FX_SYMBOLS="EURUSD",
+            FX_BACKOFF_BASE_S=0.01,
+            FX_BACKOFF_CAP_S=0.05,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+    )
+    states: list[str] = []
+
+    async def record(state: str, detail: str = "") -> None:
+        states.append(state)
+
+    async def handle(_tick: Tick) -> None:
+        return None
+
+    monkeypatch.setattr(ing, "_publish_status", record)
+    monkeypatch.setattr(ing.pipeline, "handle", handle)
+
+    async with fault_server(FaultConfig(go_dark_after_frames=3, frames_per_second=500)) as server:
+
+        def build_provider() -> _PatchedTiingo:
+            if server.connections >= 2:
+                ing._shutdown.set()  # the third session ends after its first quote
+            return _PatchedTiingo(server.url, ["EURUSD"], keepalive_s=0.1)
+
+        ing._build_provider = build_provider  # type: ignore[method-assign]
+        await asyncio.wait_for(ing._run_as_leader(), timeout=10.0)
+
+    assert server.connections == 3
+    assert states.count("degraded") == 2
+    assert states[-1] == "healthy"
 
 
 async def test_supervisor_reconnects_after_a_drop() -> None:

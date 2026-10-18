@@ -28,6 +28,13 @@ class FaultConfig:
 
     # Close the connection abruptly after N frames (simulates a network drop).
     drop_after_frames: int | None = None
+    # Close with 1000 after N frames: a server restart or a draining load
+    # balancer. The client sees ConnectionClosedOK.
+    close_cleanly_after_frames: int | None = None
+    # Stop reading as well as sending after N frames, as a dead Wi-Fi link does.
+    # Pings go unanswered, so a client with keepalive enabled fails the socket
+    # with "1011 keepalive ping timeout" - the production failure, end to end.
+    go_dark_after_frames: int | None = None
     # Emit an unparseable frame every N frames.
     malformed_every: int | None = None
     # Stop sending anything after N frames, but hold the socket open. This is the
@@ -92,6 +99,22 @@ class FaultServer:
                     and sent_this_connection >= cfg.drop_after_frames
                 ):
                     await ws.close(code=1006)
+                    return
+
+                if (
+                    cfg.close_cleanly_after_frames is not None
+                    and sent_this_connection >= cfg.close_cleanly_after_frames
+                ):
+                    await ws.close()
+                    return
+
+                if (
+                    cfg.go_dark_after_frames is not None
+                    and sent_this_connection >= cfg.go_dark_after_frames
+                ):
+                    ws.transport.pause_reading()
+                    await self._stopping.wait()
+                    ws.transport.resume_reading()
                     return
 
                 sent_this_connection += 1
