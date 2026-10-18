@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from collections.abc import AsyncIterator, Callable
 
 import pytest
@@ -297,6 +298,48 @@ class TestTheIngestor:
         )
         assert not ing.lease.lost.is_set()
         assert all(TOKEN not in str(s["detail"]) for s in statuses)
+
+    async def test_it_rides_out_a_wifi_drop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """2026-10-17: the socket times out, then DNS and the handshake fail while the
+        Wi-Fi is down, then the network returns. All inside one leader loop."""
+        ing, statuses = build(monkeypatch)
+        outcomes: list[ScriptedSocket | OSError] = [
+            ScriptedSocket([quote()], then=keepalive_timeout()),
+            socket.gaierror(-2, "Name or service not known"),
+            TimeoutError("timed out during opening handshake"),
+            ScriptedSocket([quote()], then=closed_cleanly()),
+        ]
+        attempts = 0
+
+        async def connect(_url: str, **_kwargs: object) -> ScriptedSocket:
+            nonlocal attempts
+            outcome = outcomes[attempts]
+            attempts += 1
+            if attempts == len(outcomes):
+                ing._shutdown.set()  # the recovered session ends after its first quote
+            if isinstance(outcome, OSError):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(CONNECT, connect)
+        await asyncio.wait_for(ing._run_as_leader(), timeout=5.0)
+
+        assert attempts == len(outcomes)
+        assert [s["state"] for s in statuses] == [
+            "connecting",
+            "healthy",
+            "degraded",
+            "degraded",
+            "degraded",
+            "connecting",
+            "healthy",
+        ]
+        degraded = [s for s in statuses if s["state"] == "degraded"]
+        assert "keepalive ping timeout" in str(degraded[0]["detail"])
+        assert "Name or service not known" in str(degraded[1]["detail"])
+        assert "timed out during opening handshake" in str(degraded[2]["detail"])
+        assert [s["failures"] for s in degraded] == [1, 2, 3]
+        assert not ing.lease.lost.is_set()
 
     async def test_a_rejected_token_still_stops_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Retrying a 401 gets the key banned; the drop fix must not catch it."""
