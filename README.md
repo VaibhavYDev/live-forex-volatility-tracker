@@ -336,7 +336,7 @@ and each sealed-minute frame carries the bar the history set stores. The browser
 keeps one series of minutes per pair (the snapshot, then one request for the
 day of minutes the hot cache holds, then each sealed minute) and folds 1m to 30m
 from it with the server's own rules, so a timeframe switch is instant and asks
-the network for nothing. `tests/fixtures/candle_parity.json` holds the server's
+the network for nothing. `apps/web/src/test/candle_parity.json` holds the server's
 folds, and both implementations are tested against it. 1D candles are the
 provider's days; today's is joined with the minutes we observed and labelled
 partial when any open-market minute of it has no bar. A minute with no bar is

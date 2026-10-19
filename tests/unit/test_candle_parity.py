@@ -3,10 +3,10 @@
 Every intraday timeframe is folded in the browser from one-minute bars, so the
 dashboard draws a candle `/api/bars` never served. These two folds must agree
 exactly, and the market calendar the daily candle relies on must agree with the
-one the ingestor runs. Each side is tested against `tests/fixtures/
+one the ingestor runs. Each side is tested against `apps/web/src/test/
 candle_parity.json`: this file checks that the fixture is what `fx_core` computes
-today, `apps/web/src/lib/__tests__/parity.test.ts` that the browser computes the
-same from the same input.
+today; `apps/web/src/lib/__tests__/candles.test.ts` and `market.test.ts` check
+that the browser computes the same from the same input.
 
 The minutes are generated, not recorded - the point is the arithmetic, not any
 real price - and shaped like the cases that matter: provider history turning
@@ -28,7 +28,11 @@ from typing import Any
 from fx_core.calendar import is_market_open
 from fx_core.intervals import fold
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "candle_parity.json"
+# Inside the web app: its image is built from apps/web alone, and the browser
+# tests import this file.
+FIXTURE = (
+    Path(__file__).resolve().parents[2] / "apps" / "web" / "src" / "test" / "candle_parity.json"
+)
 TIMEFRAMES = ("1m", "3m", "5m", "10m", "15m", "30m")
 SYMBOLS = {"EURUSD": (1.08, 5), "USDJPY": (150.0, 3)}
 

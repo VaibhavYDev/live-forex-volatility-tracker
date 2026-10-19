@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import parity from "../../../../../tests/fixtures/candle_parity.json";
+import parity from "../../test/candle_parity.json";
 import { isMarketOpen, openMinutes } from "../market";
 
 /**

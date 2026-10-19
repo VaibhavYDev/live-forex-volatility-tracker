@@ -18,7 +18,7 @@
  *   bar covers the minute from its start, ours may have joined mid-minute.
  * - `src` is the shared source, or "mixed" when both contributed.
  *
- * `tests/fixtures/candle_parity.json` holds the server's own folds of a set of
+ * `apps/web/src/test/candle_parity.json` holds the server's own folds of a set of
  * minutes, and both implementations are tested against it.
  */
 

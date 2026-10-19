@@ -185,7 +185,7 @@ class TestMarketRest:
         """Checked against a grouping done here, not against fold() itself.
 
         The browser folds the same minutes into the same candles; the two agree
-        through tests/fixtures/candle_parity.json.
+        through apps/web/src/test/candle_parity.json.
         """
         rng = random.Random(symbol)
         start = int(datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp())

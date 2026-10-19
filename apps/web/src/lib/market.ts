@@ -8,7 +8,7 @@
  * Same convention: the week runs Sunday 17:00 to Friday 17:00 New York time, and
  * New York is resolved through `Intl`, so DST moves the UTC open between 21:00
  * and 22:00 without anything here knowing the dates. Holidays are not modelled,
- * exactly as on the server. `tests/fixtures/candle_parity.json` holds the
+ * exactly as on the server. `src/test/candle_parity.json` holds the
  * server's answers for the boundary minutes and both sides are tested on them.
  */
 
