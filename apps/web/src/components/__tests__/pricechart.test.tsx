@@ -1,99 +1,366 @@
-import { act, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as lwc from "../../test/lwc";
 
 vi.mock("lightweight-charts", () => ({ createChart: lwc.createChart }));
 
 import { flushFrames } from "../../test/setup";
+import { TF_SECONDS, bucketStart, foldMinutes } from "../../lib/candles";
 import { StoreCtx } from "../../lib/stream/hooks";
 import { MarketStore } from "../../lib/stream/store";
-import type { Bar, Quote, Transition } from "../../lib/stream/types";
+import type { Bar, Transition } from "../../lib/stream/types";
 import { ThemeProvider } from "../../lib/theme";
 import { PriceChart } from "../charts/PriceChart";
+import { TIMEFRAMES } from "../TimeframeBar";
 
-const T0 = 1_787_000_000; // a minute boundary
+/**
+ * The chart, with Lightweight Charts replaced by a recorder. What is asserted
+ * is what the chart hands the library: which candles, through `setData` or
+ * `update`, in what order - the pixels are the library's business.
+ */
+
+const BASE = 1_792_576_800; // Wednesday 2026-10-21 10:00 UTC
+const LABEL: Record<string, string> = {
+  "1m": "1 minute",
+  "3m": "3 minutes",
+  "5m": "5 minutes",
+  "10m": "10 minutes",
+  "15m": "15 minutes",
+  "30m": "30 minutes",
+  "1d": "1 day",
+};
+
 let store: MarketStore;
 
 beforeEach(() => {
   store = new MarketStore();
   lwc.reset();
-});
-
-const bars = (n: number, px: number, from = T0): Bar[] =>
-  Array.from({ length: n }, (_, i) => ({
-    t: from + i * 60,
-    o: px,
-    h: px,
-    l: px,
-    c: px,
-    n: 10,
-    src: "stream",
-  }));
-
-const quote = (symbol: string, mid: number, minute: number): Quote => ({
-  symbol,
-  bid: mid,
-  ask: mid,
-  mid,
-  ts: new Date((T0 + minute * 60 + 5) * 1000).toISOString(),
-});
-
-const mount = (symbol: string) =>
-  render(
-    <ThemeProvider>
-      <StoreCtx.Provider value={store}>
-        <PriceChart symbol={symbol} />
-      </StoreCtx.Provider>
-    </ThemeProvider>,
+  // History requests stay pending unless a test answers them.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => new Promise<Response>(() => {})),
   );
+});
 
-const tick = (q: Quote) =>
+// Not unstubAllGlobals: that would also take away the setup's rAF and
+// ResizeObserver stand-ins. Each test stubs fetch afresh above.
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+/** Minute `i` after 10:00, drifting up so every candle has a distinct shape. */
+const m = (i: number, over: Partial<Bar> = {}): Bar => ({
+  t: BASE + i * 60,
+  o: 1.08 + i * 1e-4,
+  h: 1.08 + i * 1e-4 + 5e-4,
+  l: 1.08 + i * 1e-4 - 5e-4,
+  c: 1.08 + (i + 1) * 1e-4,
+  n: 10,
+  src: "stream",
+  ...over,
+});
+const minutes = (count: number, from = 0, over: Partial<Bar> = {}) =>
+  Array.from({ length: count }, (_, i) => m(from + i, over));
+
+/** Minutes the history request already delivered, so nothing is fetched. */
+function loaded(symbol: string, bars: Bar[]) {
   act(() => {
-    store.offer(q);
+    store.mergeMinutes(symbol, bars, "history");
+    store.historyLoaded(symbol, store.minuteGen(symbol));
+  });
+}
+
+/** One tick frame: the minute so far, and the price that rides with it. */
+function live(symbol: string, bar: Bar) {
+  act(() => {
+    store.applyForming(symbol, bar);
+    store.offer({
+      symbol,
+      bid: bar.c,
+      ask: bar.c,
+      mid: bar.c,
+      ts: new Date((bar.t + 30) * 1000).toISOString(),
+    });
     flushFrames();
   });
+}
 
-describe("the in-flight bar", () => {
-  it("does not carry one symbol's OHLC into another's chart", () => {
-    /**
-     * The defect. Switching to a pair with no cached bars left the previous
-     * pair's in-flight bar in place — the snapshot effect returns early on an
-     * empty series and never cleared it — so the next tick merged a EURUSD
-     * open, high and low with a USDJPY close and drew it as a candle.
-     *
-     * A currency pair trading near 1.08 and one trading near 157 make the
-     * corruption obvious; at similar price levels it would just be quietly wrong.
-     */
-    act(() => store.setBars({ EURUSD: bars(3, 1.0842) }));
-    const view = mount("EURUSD");
-    tick(quote("EURUSD", 1.0842, 3));
+const ui = (symbol: string) => (
+  <ThemeProvider>
+    <StoreCtx.Provider value={store}>
+      <PriceChart symbol={symbol} />
+    </StoreCtx.Provider>
+  </ThemeProvider>
+);
+const mount = (symbol: string) => render(ui(symbol));
+const pick = (tf: string) => act(() => screen.getByRole("button", { name: LABEL[tf] }).click());
 
-    view.rerender(
-      <ThemeProvider>
-        <StoreCtx.Provider value={store}>
-          <PriceChart symbol="USDJPY" />
-        </StoreCtx.Provider>
-      </ThemeProvider>,
-    );
+type Point = { time: number; open: number; high: number; low: number; close: number; color?: string };
+const updates = (): Point[] => lwc.chart!.candles.update.mock.calls.map((c) => c[0] as Point);
+const drawn = (): Point[] => lwc.chart!.candles.setData.mock.calls.at(-1)![0] as Point[];
+const candle = (b: Bar) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c });
 
+describe("the live candle on every timeframe", () => {
+  it.each(TIMEFRAMES.filter((tf) => tf !== "1d"))(
+    "%s: its bucket's sealed minutes, extended by the minute forming",
+    (tf) => {
+      // 10:00-10:36 sealed, 10:37 forming: inside a bucket on every timeframe.
+      const sealed = minutes(37);
+      loaded("EURUSD", sealed);
+      mount("EURUSD");
+      pick(tf);
+
+      const forming = m(37, { h: 2, l: 0.5, c: 1.5, n: 3 });
+      live("EURUSD", forming);
+
+      const seconds = TF_SECONDS[tf];
+      const start = bucketStart(forming.t, seconds);
+      const inBucket = sealed.filter((b) => b.t >= start);
+      const got = updates().at(-1)!;
+      expect(got).toMatchObject({
+        time: start,
+        open: inBucket[0]?.o ?? forming.o,
+        high: 2,
+        low: 0.5,
+        close: 1.5,
+      });
+      // Nothing was fetched to switch, or to move.
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("1d: the provider's day joined with today's minutes, extended by the minute forming", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime((BASE + 38 * 60) * 1000);
+    const today = bucketStart(BASE, 86_400);
+    const day: Bar = { t: today, o: 1.07, h: 1.2, l: 1.0, c: 1.08, n: 0, src: "backfill" };
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [day] }),
+    } as Response);
+    loaded("EURUSD", minutes(37));
+    mount("EURUSD");
+    pick("1d");
+    await waitFor(() => expect(store.daily("EURUSD")).toHaveLength(1));
+
+    live("EURUSD", m(37, { h: 1.3, c: 1.09 }));
+    expect(updates().at(-1)).toMatchObject({ time: today, open: 1.07, high: 1.3, low: 1.0, close: 1.09 });
+  });
+
+  it("keeps the open, extends the range only when exceeded, and moves the close", () => {
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    pick("15m");
+    const open = m(0).o;
+
+    // Inside the range so far: only the close moves.
+    live("EURUSD", m(5, { h: 1.0806, l: 1.0799, c: 1.08, n: 1 }));
+    live("EURUSD", m(5, { h: 1.0806, l: 1.0799, c: 1.0801, n: 2 }));
+    expect(updates().at(-1)).toMatchObject({ open, high: m(4).h, low: m(0).l, close: 1.0801 });
+
+    live("EURUSD", m(5, { h: 1.09, l: 1.07, c: 1.075, n: 3 }));
+    expect(updates().at(-1)).toMatchObject({ open, high: 1.09, low: 1.07, close: 1.075 });
+  });
+
+  it("loses no extreme to frame conflation", () => {
+    // Two frames inside one painted frame: the price of the first is gone,
+    // its high is not, because the minute is cumulative.
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    pick("5m");
+    act(() => {
+      store.applyForming("EURUSD", m(5, { h: 1.2, c: 1.19, n: 1 }));
+      store.offer({ symbol: "EURUSD", bid: 1.19, ask: 1.19, mid: 1.19, ts: new Date().toISOString() });
+      store.applyForming("EURUSD", m(5, { h: 1.2, c: 1.09, n: 2 }));
+      store.offer({ symbol: "EURUSD", bid: 1.09, ask: 1.09, mid: 1.09, ts: new Date().toISOString() });
+      flushFrames();
+    });
+    expect(updates().at(-1)).toMatchObject({ time: BASE + 300, high: 1.2, close: 1.09 });
+  });
+
+  it("starts a new candle on the UTC boundary and settles the one before", () => {
+    loaded("EURUSD", minutes(14));
+    mount("EURUSD");
+    pick("15m");
+    live("EURUSD", m(14));
+    live("EURUSD", m(15, { n: 1 }));
+
+    const settled = updates().filter((p) => p.time === BASE).at(-1)!;
+    expect(settled).toMatchObject(candle(foldMinutes(minutes(15), 900)[0]!));
+    expect(settled.color).toBeUndefined();
+    expect(updates().at(-1)).toMatchObject({ time: BASE + 900, open: m(15).o });
+  });
+
+  it("never redraws a candle once a newer one has started", () => {
+    loaded("EURUSD", minutes(14));
+    mount("EURUSD");
+    pick("15m");
+    live("EURUSD", m(14));
+    live("EURUSD", m(15, { n: 1 }));
     lwc.chart!.candles.update.mockClear();
-    tick(quote("USDJPY", 157.21, 3));
 
-    const drawn = lwc.chart!.candles.update.mock.calls.at(-1)?.[0];
-    expect(drawn).toBeDefined();
-    // Every leg of the candle must belong to USDJPY.
+    // A late frame for the earlier candle's last minute: the live candle is
+    // repainted as it was, the finished one is not touched.
+    live("EURUSD", m(14, { n: 99, h: 9 }));
+    expect(updates().map((p) => p.time)).not.toContain(BASE);
+    expect(updates().every((p) => p.high !== 9)).toBe(true);
+  });
+
+  it("only ever moves forward", () => {
+    loaded("EURUSD", minutes(20));
+    mount("EURUSD");
+    pick("3m");
+    for (let i = 20; i < 40; i++) {
+      live("EURUSD", m(i, { n: 1 }));
+      live("EURUSD", m(i, { n: 2 }));
+      act(() => store.sealMinute("EURUSD", m(i, { n: 2 })));
+    }
+    const times = updates().map((p) => p.time);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+  });
+
+  it("opens mid-candle with the candle's whole range so far", () => {
+    // A browser that connects at 10:37 into a 30-minute candle begun at 10:30.
+    act(() => store.mergeMinutes("EURUSD", [...minutes(30), m(30, { h: 1.5 }), ...minutes(6, 31)]));
+    act(() => store.historyLoaded("EURUSD", store.minuteGen("EURUSD")));
+    act(() => store.applyForming("EURUSD", m(37, { n: 2 })));
+    mount("EURUSD");
+    pick("30m");
+    expect(updates().at(-1)).toMatchObject({ time: BASE + 1_800, open: m(30).o, high: 1.5 });
+  });
+
+  it("draws nothing that was not observed", () => {
+    // A weekend: the quote outlives the minute, and no candle is made of it.
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    act(() => {
+      store.offer({ symbol: "EURUSD", bid: 1.2, ask: 1.2, mid: 1.2, ts: new Date().toISOString() });
+      flushFrames();
+    });
+    expect(lwc.chart!.candles.update).not.toHaveBeenCalled();
+    expect(drawn()).toEqual(minutes(5).map(candle));
+  });
+
+  it("still moves on a server that sends prices only", () => {
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    act(() => {
+      store.applyQuote("EURUSD", 1.2, new Date((BASE + 5 * 60 + 1) * 1000).toISOString());
+      store.offer({ symbol: "EURUSD", bid: 1.2, ask: 1.2, mid: 1.2, ts: new Date().toISOString() });
+      flushFrames();
+    });
+    expect(updates().at(-1)).toMatchObject({ time: BASE + 300, open: 1.2, close: 1.2 });
+  });
+});
+
+describe("the forming style", () => {
+  it("draws the candle still forming unfinished, then plain when its bucket ends", () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime((BASE + 5 * 60 + 20) * 1000);
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    live("EURUSD", m(5));
+    expect(updates().at(-1)!.color).toMatch(/66$/);
+
+    // The minute ends with no tick to say so: a quiet market.
+    act(() => void vi.advanceTimersByTime(60_000));
+    expect(updates().at(-1)).toMatchObject({ time: BASE + 300 });
+    expect(updates().at(-1)!.color).toBeUndefined();
+  });
+
+  it("draws a bucket that has already ended plainly", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime((BASE + 3_600) * 1000);
+    loaded("EURUSD", minutes(5));
+    mount("EURUSD");
+    live("EURUSD", m(5));
+    expect(updates().at(-1)!.color).toBeUndefined();
+  });
+});
+
+describe("drawing as little as is correct", () => {
+  it("switches timeframe at once, from minutes already held", () => {
+    loaded("EURUSD", minutes(60));
+    mount("EURUSD");
+    pick("30m");
+    expect(drawn()).toEqual(foldMinutes(minutes(60), 1_800).map(candle));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("adds a sealed minute with update(), not a full redraw", () => {
+    loaded("EURUSD", minutes(10));
+    mount("EURUSD");
+    const redraws = lwc.chart!.candles.setData.mock.calls.length;
+    act(() => store.sealMinute("EURUSD", m(10)));
+    expect(lwc.chart!.candles.setData.mock.calls.length).toBe(redraws);
+    expect(updates().at(-1)).toEqual(candle(m(10)));
+  });
+
+  it("does not redraw when the seal matches what the live candle already showed", () => {
+    loaded("EURUSD", minutes(10));
+    mount("EURUSD");
+    live("EURUSD", m(10));
+    live("EURUSD", m(11, { n: 1 }));
+    const redraws = lwc.chart!.candles.setData.mock.calls.length;
+    act(() => store.sealMinute("EURUSD", m(10)));
+    expect(lwc.chart!.candles.setData.mock.calls.length).toBe(redraws);
+  });
+
+  it("redraws in full when a seal corrects a candle the chart has moved past", () => {
+    loaded("EURUSD", minutes(10));
+    mount("EURUSD");
+    live("EURUSD", m(10));
+    live("EURUSD", m(11, { n: 1 }));
+    act(() => store.sealMinute("EURUSD", m(10, { h: 1.5 })));
+    expect(drawn().at(-1)).toMatchObject({ time: BASE + 600, high: 1.5 });
+  });
+
+  it("fits the view once per pair and timeframe, keeping the user's zoom after that", () => {
+    loaded("EURUSD", minutes(120));
+    mount("EURUSD");
+    expect(lwc.timeScale.fitContent).toHaveBeenCalledTimes(1);
+
+    for (let i = 120; i < 125; i++) act(() => store.sealMinute("EURUSD", m(i)));
+    act(() => store.mergeMinutes("EURUSD", minutes(30, -30, { src: "backfill", n: 0 }), "history"));
+    expect(lwc.timeScale.fitContent).toHaveBeenCalledTimes(1);
+
+    pick("5m");
+    expect(lwc.timeScale.applyOptions).toHaveBeenLastCalledWith({ barSpacing: 8, rightOffset: 4 });
+  });
+
+  it("shows the newest few hundred candles of a long series, the rest a scroll away", () => {
+    loaded("EURUSD", minutes(1_000));
+    mount("EURUSD");
+    expect(lwc.timeScale.setVisibleLogicalRange).toHaveBeenCalledWith({ from: 700, to: 1_002 });
+    expect(drawn()).toHaveLength(1_000);
+  });
+});
+
+describe("pairs never share a candle", () => {
+  it("does not carry one symbol's OHLC into another's chart", () => {
+    loaded("EURUSD", minutes(3));
+    loaded("USDJPY", []);
+    const view = mount("EURUSD");
+    live("EURUSD", m(3));
+
+    view.rerender(ui("USDJPY"));
+    lwc.chart!.candles.update.mockClear();
+    live("USDJPY", { t: BASE + 180, o: 157.21, h: 157.21, l: 157.21, c: 157.21, n: 1, src: "stream" });
+
+    const got = updates().at(-1)!;
     for (const leg of ["open", "high", "low", "close"] as const) {
-      expect(drawn[leg], `${leg} came from the previous symbol`).toBeCloseTo(157.21, 2);
+      expect(got[leg], `${leg} came from the previous symbol`).toBeCloseTo(157.21, 2);
     }
   });
 
   it("clears the previous pair's candles when the new pair has no history yet", () => {
-    act(() => {
-      store.setBars({ EURUSD: bars(3, 1.0842) });
+    loaded("EURUSD", minutes(3));
+    loaded("USDJPY", []);
+    act(() =>
       store.pushAlert({
         s: "EURUSD",
         seq: 1,
-        ts: new Date((T0 + 60) * 1000).toISOString(),
+        ts: new Date((BASE + 60) * 1000).toISOString(),
         old_regime: "normal",
         new_regime: "stressed",
         trigger_value: 3.4,
@@ -101,41 +368,15 @@ describe("the in-flight bar", () => {
         sigma: 0.0004,
         cause: "threshold",
         reason: "held",
-      });
-    });
-    const view = mount("EURUSD");
-    expect(lwc.chart!.candles.setData.mock.calls.at(-1)![0]).toHaveLength(3);
-
-    view.rerender(
-      <ThemeProvider>
-        <StoreCtx.Provider value={store}>
-          <PriceChart symbol="USDJPY" />
-        </StoreCtx.Provider>
-      </ThemeProvider>,
+      }),
     );
+    const view = mount("EURUSD");
+    expect(drawn()).toHaveLength(3);
 
-    expect(lwc.chart!.candles.setData.mock.calls.at(-1)![0]).toEqual([]);
+    view.rerender(ui("USDJPY"));
+    expect(drawn()).toEqual([]);
     expect(lwc.chart!.candles.setMarkers.mock.calls.at(-1)![0]).toEqual([]);
     expect(screen.getByText("Waiting for USDJPY history…")).toBeInTheDocument();
-  });
-
-  it("merges ticks within a minute and opens a new bar across the boundary", () => {
-    act(() => store.setBars({ EURUSD: bars(2, 1.08) }));
-    mount("EURUSD");
-
-    tick(quote("EURUSD", 1.09, 2));
-    tick(quote("EURUSD", 1.11, 2));
-    tick(quote("EURUSD", 1.07, 2));
-    const merged = lwc.chart!.candles.update.mock.calls.at(-1)![0];
-    expect(merged.high).toBeCloseTo(1.11, 5);
-    expect(merged.low).toBeCloseTo(1.07, 5);
-    expect(merged.close).toBeCloseTo(1.07, 5);
-
-    tick(quote("EURUSD", 1.1, 3));
-    const fresh = lwc.chart!.candles.update.mock.calls.at(-1)![0];
-    expect(fresh.time).toBeGreaterThan(merged.time);
-    expect(fresh.open).toBeCloseTo(1.1, 5);
-    expect(fresh.high).toBeCloseTo(1.1, 5);
   });
 });
 
@@ -143,7 +384,7 @@ describe("regime overlays", () => {
   const transition = (min: number, to: "normal" | "stressed"): Transition => ({
     s: "EURUSD",
     seq: min,
-    ts: new Date((T0 + min * 60) * 1000).toISOString(),
+    ts: new Date((BASE + min * 60) * 1000).toISOString(),
     old_regime: to === "stressed" ? "normal" : "stressed",
     new_regime: to,
     trigger_value: 3.4,
@@ -156,8 +397,8 @@ describe("regime overlays", () => {
   it("hands markers to the library oldest first", () => {
     // The store holds alerts newest first for the alert list; Lightweight Charts
     // requires ascending time and misplaces them silently otherwise.
+    loaded("EURUSD", minutes(60));
     act(() => {
-      store.setBars({ EURUSD: bars(60, 1.08) });
       store.pushAlert(transition(10, "stressed"));
       store.pushAlert(transition(30, "normal"));
     });
@@ -165,14 +406,14 @@ describe("regime overlays", () => {
 
     const markers = lwc.chart!.candles.setMarkers.mock.calls.at(-1)![0];
     expect(markers).toHaveLength(2);
-    expect(markers.map((m: { time: number }) => m.time)).toEqual(
-      [...markers.map((m: { time: number }) => m.time)].sort((a, b) => a - b),
+    expect(markers.map((x: { time: number }) => x.time)).toEqual(
+      [...markers.map((x: { time: number }) => x.time)].sort((a, b) => a - b),
     );
   });
 
   it("marks escalation and clear with different shapes, not only colours", () => {
+    loaded("EURUSD", minutes(60));
     act(() => {
-      store.setBars({ EURUSD: bars(60, 1.08) });
       store.pushAlert(transition(10, "stressed"));
       store.pushAlert(transition(30, "normal"));
     });
@@ -180,13 +421,13 @@ describe("regime overlays", () => {
 
     const shapes = lwc.chart!.candles.setMarkers.mock.calls
       .at(-1)![0]
-      .map((m: { shape: string }) => m.shape);
+      .map((x: { shape: string }) => x.shape);
     expect(new Set(shapes).size).toBe(2);
   });
 
   it("shades only the bars inside a stressed span", () => {
+    loaded("EURUSD", minutes(60));
     act(() => {
-      store.setBars({ EURUSD: bars(60, 1.08) });
       store.pushAlert(transition(20, "stressed"));
       store.pushAlert(transition(40, "normal"));
     });
@@ -196,15 +437,13 @@ describe("regime overlays", () => {
     const shade = lwc.chart!.histograms[0]!;
     const data = shade.setData.mock.calls.at(-1)![0] as { time: number; value: number }[];
     const hot = data.filter((d) => d.value === 1).map((d) => d.time);
-    expect(hot[0]).toBe(T0 + 20 * 60);
-    expect(hot.at(-1)).toBe(T0 + 39 * 60);
+    expect(hot[0]).toBe(BASE + 20 * 60);
+    expect(hot.at(-1)).toBe(BASE + 39 * 60);
   });
 
   it("leaves an unresolved event shaded to the right edge", () => {
-    act(() => {
-      store.setBars({ EURUSD: bars(60, 1.08) });
-      store.pushAlert(transition(30, "stressed"));
-    });
+    loaded("EURUSD", minutes(60));
+    act(() => store.pushAlert(transition(30, "stressed")));
     mount("EURUSD");
 
     const data = lwc.chart!.histograms[0]!.setData.mock.calls.at(-1)![0] as {
@@ -217,7 +456,7 @@ describe("regime overlays", () => {
 
 describe("lifecycle", () => {
   it("tears the chart down on unmount", () => {
-    act(() => store.setBars({ EURUSD: bars(3, 1.08) }));
+    loaded("EURUSD", minutes(3));
     const view = mount("EURUSD");
     const created = lwc.chart!;
     view.unmount();
@@ -225,7 +464,7 @@ describe("lifecycle", () => {
   });
 
   it("labels the canvas for screen readers", () => {
-    act(() => store.setBars({ EURUSD: bars(3, 1.08) }));
+    loaded("EURUSD", minutes(3));
     const { container } = mount("EURUSD");
     expect(container.querySelector('[role="img"]')).toHaveAttribute(
       "aria-label",
@@ -242,92 +481,94 @@ describe("provenance", () => {
    * behind a young feed — distinguishing nothing and burying the candles it sat
    * under. The boundary is the part worth showing.
    */
-
-  /** Bars whose provenance is the point; `src` is the only field that varies. */
-  const mixed = (...srcs: string[]): Bar[] =>
-    srcs.map((src, i) => ({
-      t: T0 + i * 60,
-      o: 1.08,
-      h: 1.081,
-      l: 1.079,
-      c: 1.08,
-      n: 10,
-      src,
-    }));
-
-  const alertAt = (min: number): Transition => ({
-    s: "EURUSD",
-    seq: min,
-    ts: new Date((T0 + min * 60) * 1000).toISOString(),
-    old_regime: "normal",
-    new_regime: "stressed",
-    trigger_value: 3.4,
-    threshold_value: 3,
-    sigma: 0.0004,
-    cause: "threshold",
-    reason: "held",
-  });
+  const sources = (...srcs: string[]): Bar[] =>
+    srcs.map((src, i) => m(i, { src, n: src === "backfill" ? 0 : 10 }));
 
   const markers = () => lwc.chart!.candles.setMarkers.mock.calls.at(-1)?.[0] ?? [];
   const boundary = () =>
-    markers().find((m: { text?: string }) => /live from here/i.test(String(m.text)));
+    markers().find((x: { text?: string }) => /live from here/i.test(String(x.text)));
 
   it("marks where provider history ends and live data begins", () => {
-    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    loaded("EURUSD", sources("backfill", "backfill", "stream"));
     mount("EURUSD");
     expect(boundary()).toBeDefined();
   });
 
   it("places it on the first live bar, not the last recorded one", () => {
-    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    loaded("EURUSD", sources("backfill", "backfill", "stream"));
     mount("EURUSD");
-    expect(boundary()?.time).toBe(T0 + 120);
+    expect(boundary()?.time).toBe(BASE + 120);
   });
 
   it("says nothing when every bar is live", () => {
-    // A marker on a chart with no provider history is noise claiming to be
-    // information.
-    act(() => store.setBars({ EURUSD: mixed("stream", "stream") }));
+    loaded("EURUSD", sources("stream", "stream"));
     mount("EURUSD");
     expect(boundary()).toBeUndefined();
   });
 
   it("says nothing when every bar is provider history", () => {
-    // There is no boundary inside this window; the caption carries it instead.
-    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
+    loaded("EURUSD", sources("backfill", "backfill"));
     mount("EURUSD");
     expect(boundary()).toBeUndefined();
   });
 
   it("states the proportion in text", () => {
-    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill", "stream") }));
+    loaded("EURUSD", sources("backfill", "backfill", "stream"));
     mount("EURUSD");
     expect(screen.getByText(/2 of 3 bars from provider history/i)).toBeInTheDocument();
   });
 
   it("calls a window of provider history what it is", () => {
-    act(() => store.setBars({ EURUSD: mixed("backfill", "backfill") }));
+    loaded("EURUSD", sources("backfill", "backfill"));
     mount("EURUSD");
     expect(screen.getByText(/^provider history$/i)).toBeInTheDocument();
   });
 
+  it("calls a candle the stream joined part-way through what it is", () => {
+    // 10:00-10:02 provider history, 10:03-10:05 live: on 5m the first candle
+    // holds both. It used to be called provider history, after its first minute.
+    loaded("EURUSD", sources("backfill", "backfill", "backfill", "stream", "stream", "stream"));
+    mount("EURUSD");
+    pick("5m");
+    expect(screen.getByText(/^1 of 2 bars part provider, part live$/i)).toBeInTheDocument();
+    expect(boundary()?.time).toBe(BASE);
+  });
+
   it("keeps markers ascending once the boundary is merged in", () => {
-    // Lightweight Charts silently misplaces markers given an unsorted list, so
-    // the boundary cannot simply be prepended to the alert markers.
-    //
-    // The alert is placed INSIDE the backfilled stretch, i.e. earlier than the
-    // boundary. That ordering is what makes the bug observable: prepending a
-    // late boundary to an early alert yields a descending list. An alert after
-    // the boundary would come out sorted either way and prove nothing.
-    const many = Array.from({ length: 40 }, (_, i) => (i < 30 ? "backfill" : "stream"));
-    act(() => {
-      store.setBars({ EURUSD: mixed(...many) });
-      store.pushAlert(alertAt(10)); // inside the backfilled span
-    });
+    // The alert sits inside the backfilled stretch, earlier than the boundary:
+    // prepending a late boundary to an early alert yields a descending list.
+    loaded("EURUSD", sources(...Array.from({ length: 40 }, (_, i) => (i < 30 ? "backfill" : "stream"))));
+    act(() =>
+      store.pushAlert({
+        s: "EURUSD",
+        seq: 10,
+        ts: new Date((BASE + 600) * 1000).toISOString(),
+        old_regime: "normal",
+        new_regime: "stressed",
+        trigger_value: 3.4,
+        threshold_value: 3,
+        sigma: 0.0004,
+        cause: "threshold",
+        reason: "held",
+      }),
+    );
     mount("EURUSD");
 
-    const times = markers().map((m: { time: number }) => m.time);
+    const times = markers().map((x: { time: number }) => x.time);
     expect(times.length).toBeGreaterThanOrEqual(2);
     expect(times).toEqual([...times].sort((a: number, b: number) => a - b));
+  });
+
+  it("says when today's candle is built from fewer minutes than the market was open", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime((BASE + 10 * 60) * 1000);
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ bars: [] }) } as Response);
+    // 00:00-09:59 unseen, 10:00-10:09 held: 10 of 610 minutes.
+    loaded("EURUSD", minutes(10));
+    mount("EURUSD");
+    pick("1d");
+    expect(
+      await screen.findByText("Today partial: 10 of 610 minutes observed"),
+    ).toBeInTheDocument();
   });
 });

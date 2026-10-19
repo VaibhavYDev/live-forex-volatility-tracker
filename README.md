@@ -329,6 +329,19 @@ allocates** — returning a fresh object or a `.filter()` result makes React see
 new value on every read and re-render forever — and the store suite pins that with
 identity assertions rather than trusting the discipline.
 
+**Every timeframe's last candle is live, and built from the ingestor's own OHLC.**
+Each tick frame carries the minute so far as the ingestor aggregates it — every
+tick it saw, so a frame dropped by either conflation layer loses no high or low —
+and each sealed-minute frame carries the bar the history set stores. The browser
+keeps one series of minutes per pair (the snapshot, then one request for the
+day of minutes the hot cache holds, then each sealed minute) and folds 1m to 30m
+from it with the server's own rules, so a timeframe switch is instant and asks
+the network for nothing. `tests/fixtures/candle_parity.json` holds the server's
+folds, and both implementations are tested against it. 1D candles are the
+provider's days; today's is joined with the minutes we observed and labelled
+partial when any open-market minute of it has no bar. A minute with no bar is
+left out, never assumed to have stood still.
+
 > **Edge case: the rAF feed freeze.**
 > The flush runs inside a `requestAnimationFrame` callback, which is outside
 > React's call stack — **no error boundary can reach it.** An uncaught throw from

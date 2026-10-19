@@ -29,7 +29,17 @@ import type {
 export type ServerFrame =
   | { type: "hello"; protocol: number; server_time: string; max_symbols: number; feed: FeedStatus }
   | { type: "snapshot"; data: Record<string, SymbolSnapshot> }
-  | { type: "tick"; s: string; b: number; a: number; m: number; t: string }
+  | {
+      type: "tick";
+      s: string;
+      b: number;
+      a: number;
+      m: number;
+      t: string;
+      /** The minute so far, over every tick the ingestor saw. Absent from a
+       *  server that predates it. */
+      bar?: FormingBar;
+    }
   | {
       type: "vol";
       s: string;
@@ -41,6 +51,8 @@ export type ServerFrame =
       regime: Regime;
       enter_z: number;
       exit_z: number;
+      /** The minute this reading sealed, as history stores it. */
+      bar?: Bar;
     }
   | ({ type: "alert" } & Transition)
   | {
@@ -54,9 +66,14 @@ export type ServerFrame =
   | { type: "pong"; ts: string }
   | { type: "error"; message: string };
 
+/** A minute in progress: always our own stream's, so it carries no source. */
+export type FormingBar = Omit<Bar, "src">;
+
 export interface SymbolSnapshot {
   quote: { bid?: number; ask?: number; mid?: number; ts?: string };
   bars: Bar[];
+  /** The minute the last tick went into; null when none is held (weekends). */
+  forming?: FormingBar | null;
   vol: Record<string, unknown>;
   /** Same window as `bars` — they are the same minutes, on the same axis. */
   zhist: ZPoint[];

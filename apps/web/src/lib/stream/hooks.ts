@@ -65,6 +65,32 @@ export function useBars(symbol: string): readonly Bar[] {
   );
 }
 
+/** Sealed one-minute bars: changes once a minute, not once a tick. */
+export function useMinutes(symbol: string): readonly Bar[] {
+  const s = useStore();
+  return useSyncExternalStore(
+    useCallback((cb) => s.subMinutes(symbol, cb), [s, symbol]),
+    useCallback(() => s.minutes(symbol), [s, symbol]),
+  );
+}
+
+/** Bumps when this pair's minutes need the history request to be complete. */
+export function useMinuteGen(symbol: string): number {
+  const s = useStore();
+  return useSyncExternalStore(
+    useCallback((cb) => s.subMinutes(symbol, cb), [s, symbol]),
+    useCallback(() => s.minuteGen(symbol), [s, symbol]),
+  );
+}
+
+export function useDaily(symbol: string): readonly Bar[] {
+  const s = useStore();
+  return useSyncExternalStore(
+    useCallback((cb) => s.subDaily(symbol, cb), [s, symbol]),
+    useCallback(() => s.daily(symbol), [s, symbol]),
+  );
+}
+
 export function useZHist(symbol: string): readonly ZPoint[] {
   const s = useStore();
   return useSyncExternalStore(

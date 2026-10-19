@@ -1,7 +1,17 @@
 import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useAlerts, useConn, useFeed, useQuote, useRegime, useVol, useZHist } from "../../lib/stream/hooks";
+import {
+  useAlerts,
+  useConn,
+  useFeed,
+  useQuote,
+  useRegime,
+  useStore,
+  useVol,
+  useZHist,
+} from "../../lib/stream/hooks";
 import { StreamProvider } from "../../lib/stream/provider";
+import type { MarketStore } from "../../lib/stream/store";
 import { flushFrames } from "../../test/setup";
 
 /**
@@ -304,5 +314,99 @@ describe("connection lifecycle", () => {
     Object.defineProperty(document, "hidden", { value: false, configurable: true });
     act(() => void document.dispatchEvent(new Event("visibilitychange")));
     expect(JSON.parse(ws.sent.at(-1)!).op).toBe("subscribe");
+  });
+});
+
+describe("candles over the wire", () => {
+  /**
+   * The forming minute rides on every tick frame, the sealed one on the vol
+   * frame, the minute in progress on the snapshot. Field names here are the
+   * contract with fx_ingestor/pipeline.py and fx_api/ws/manager.py.
+   */
+  let store: MarketStore;
+  function Grab() {
+    store = useStore();
+    return null;
+  }
+  const open = () =>
+    render(
+      <StreamProvider url="ws://test/ws/stream" symbols={["EURUSD"]}>
+        <Grab />
+      </StreamProvider>,
+    );
+  const t = Date.UTC(2026, 7, 25, 12, 0) / 1000;
+  const minute = { t, o: 1.084, h: 1.0849, l: 1.0831, c: 1.0842, n: 17 };
+
+  it("takes the minute so far from each tick frame", () => {
+    open();
+    frame({ type: "tick", s: "EURUSD", b: 1.0841, a: 1.0843, m: 1.0842, t: at(0), bar: minute });
+    expect(store.forming("EURUSD")).toEqual({ ...minute, src: "stream" });
+  });
+
+  it("seals the minute a vol frame carries", () => {
+    open();
+    frame({ type: "tick", s: "EURUSD", b: 1.0841, a: 1.0843, m: 1.0842, t: at(0), bar: minute });
+    frame({
+      type: "vol",
+      s: "EURUSD",
+      ts: at(1),
+      sigma: 0.0001,
+      sigma_annualized: 0.05,
+      z: 1.2,
+      warmed_up: true,
+      regime: "normal",
+      enter_z: 3,
+      exit_z: 2,
+      bar: { ...minute, n: 18, src: "stream" },
+    });
+    expect(store.minutes("EURUSD")).toEqual([{ ...minute, n: 18, src: "stream" }]);
+    expect(store.forming("EURUSD")).toBeUndefined();
+  });
+
+  it("starts from the snapshot's minutes and the minute in progress", () => {
+    open();
+    const sealed = { ...minute, src: "stream" };
+    frame({
+      type: "snapshot",
+      data: {
+        EURUSD: {
+          quote: { bid: 1.0841, ask: 1.0843, mid: 1.0842, ts: at(1) },
+          bars: [sealed],
+          forming: { ...minute, t: t + 60, n: 3 },
+          vol: {},
+          zhist: [],
+          regime: { regime: "normal", seq: 0 },
+        },
+      },
+    });
+    expect(store.minutes("EURUSD")).toEqual([sealed]);
+    expect(store.forming("EURUSD")).toEqual({ ...minute, t: t + 60, n: 3, src: "stream" });
+  });
+
+  it("does not make a candle out of the snapshot's quote alone", () => {
+    // Over a weekend the minute has expired and the quote has not. A candle
+    // drawn from the quote would claim a tick and a range nobody observed.
+    open();
+    frame({
+      type: "snapshot",
+      data: {
+        EURUSD: {
+          quote: { bid: 1.0841, ask: 1.0843, mid: 1.0842, ts: at(1) },
+          bars: [],
+          forming: null,
+          vol: {},
+          zhist: [],
+          regime: { regime: "normal", seq: 0 },
+        },
+      },
+    });
+    act(() => void flushFrames());
+    expect(store.forming("EURUSD")).toBeUndefined();
+  });
+
+  it("builds the minute from prices when the server sends no bar", () => {
+    open();
+    frame({ type: "tick", s: "EURUSD", b: 1.0841, a: 1.0843, m: 1.0842, t: at(0) });
+    expect(store.forming("EURUSD")).toMatchObject({ o: 1.0842, c: 1.0842, n: 0 });
   });
 });
