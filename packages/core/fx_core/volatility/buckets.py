@@ -29,7 +29,12 @@ from datetime import UTC, datetime, timedelta
 from fx_core.models import Bar, BarSource
 from fx_core.volatility.welford import Welford
 
-__all__ = ["BucketAccumulator", "RollingWindow"]
+__all__ = ["GAP_BAR_MULTIPLE", "BucketAccumulator", "RollingWindow"]
+
+# A bar this far after the previous one spans a session break or an outage, so
+# the price change into it is a gap, not a minute of trading. Excluded from every
+# estimator - this is the same shape of artefact as the Sunday reopen.
+GAP_BAR_MULTIPLE = 3
 
 
 def floor_to_bucket(ts: datetime, bucket_seconds: int) -> datetime:

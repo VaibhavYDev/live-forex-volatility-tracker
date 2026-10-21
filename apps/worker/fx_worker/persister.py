@@ -52,7 +52,7 @@ import redis.asyncio as aioredis
 import structlog
 from fx_core import keys
 from fx_core.models import Bar
-from fx_core.volatility.buckets import BucketAccumulator, floor_to_bucket
+from fx_core.volatility.buckets import GAP_BAR_MULTIPLE, BucketAccumulator, floor_to_bucket
 from fx_platform import LeaderLease
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -101,6 +101,7 @@ class Persister:
 
         self._accs: dict[tuple[str, int], BucketAccumulator] = {}
         self._last_price: dict[str, float] = {}
+        self._last_bucket: dict[str, datetime] = {}
         self._provider: dict[str, str] = {}
         self._max_id: dict[tuple[str, int], str] = {}
         self._unacked: list[str] = []
@@ -142,6 +143,12 @@ class Persister:
         self._provider[symbol] = provider
         mid = (bid + ask) / 2.0
         bucket = floor_to_bucket(ts, self._bucket_seconds)
+        if (bucket - self._last_bucket.get(symbol, bucket)).total_seconds() > (
+            self._bucket_seconds * GAP_BAR_MULTIPLE
+        ):
+            # Nor is the price change across an outage or the weekend close.
+            self._last_price.pop(symbol, None)
+        self._last_bucket[symbol] = bucket
         key = (symbol, int(bucket.timestamp()))
 
         acc = self._accs.get(key)

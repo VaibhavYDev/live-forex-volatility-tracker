@@ -441,6 +441,30 @@ class TestVolatilityAnnualisation:
         expected = r * math.sqrt(600 * bars_per_year(60))
         assert json.loads(vol["sigma_annualized"]) == pytest.approx(expected, rel=1e-6)
 
+    async def test_a_return_across_an_outage_is_not_a_tick_return(
+        self, redis: aioredis.Redis
+    ) -> None:
+        """A weekend-sized jump after ten silent minutes is not one tick's move."""
+        pipeline = IngestPipeline(redis, ["EURUSD"])
+        start = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+        r, price, seq = 1e-5, 1.0842, 0
+        for i in range(600):
+            price *= math.exp(r if i % 2 else -r)
+            await pipeline.handle(_tick("EURUSD", price, start + timedelta(seconds=i / 10), seq))
+            seq += 1
+        resume = start + timedelta(minutes=11)
+        price *= math.exp(0.00229)
+        for i in range(11):  # ten ticks in the minute after the hole; the eleventh seals it
+            if i:
+                price *= math.exp(r if i % 2 else -r)
+            await pipeline.handle(_tick("EURUSD", price, resume + timedelta(seconds=6 * i), seq))
+            seq += 1
+
+        vol = await redis.hgetall(keys.vol_state("EURUSD", "1h"))
+        expected = r * math.sqrt(10 * bars_per_year(60))
+        assert json.loads(vol["sigma_annualized"]) == pytest.approx(expected, rel=1e-6)
+        assert json.loads(vol["realized_sigma"]) == pytest.approx(r, rel=1e-2)
+
 
 class TestPersisterRecovery:
     async def _seed(self, redis: aioredis.Redis, count: int) -> None:
@@ -597,6 +621,34 @@ class TestPersisterRecovery:
 
         live = db.rows[("USDJPY", minute)]
         assert live.sum_ret_sq == pytest.approx(math.log(158.345 / 158.344) ** 2)
+
+    async def test_a_return_never_spans_an_outage(self, redis: aioredis.Redis) -> None:
+        """Ten silent minutes are an outage or the weekend; one silent minute is a quiet market."""
+        db = StubDatabase()
+        persister = Persister(redis, db, consumer_name="w1")  # type: ignore[arg-type]
+        minute = datetime(2026, 10, 19, 14, 20, tzinfo=UTC)
+        for entry_id, price, ts in (
+            ("1-0", 1.0842, minute - timedelta(minutes=10)),
+            ("2-0", 1.0851, minute),
+            ("3-0", 1.0852, minute + timedelta(seconds=5)),
+            ("4-0", 1.0855, minute + timedelta(minutes=2)),
+        ):
+            persister._ingest_entry(
+                entry_id,
+                {
+                    "s": "EURUSD",
+                    "b": str(price),
+                    "a": str(price),
+                    "t": ts.isoformat(),
+                    "p": "tiingo",
+                },
+            )
+        await persister.flush()
+
+        after_hole = db.rows[("EURUSD", minute)]
+        assert after_hole.sum_ret_sq == pytest.approx(math.log(1.0852 / 1.0851) ** 2)
+        after_quiet = db.rows[("EURUSD", minute + timedelta(minutes=2))]
+        assert after_quiet.sum_ret_sq == pytest.approx(math.log(1.0855 / 1.0852) ** 2)
 
     async def _wait_for(self, db: StubDatabase, ticks: int) -> None:
         for _ in range(100):
