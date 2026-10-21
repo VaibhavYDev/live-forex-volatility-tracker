@@ -74,12 +74,16 @@ class ClientSession:
     conflated: int = 0
     sent: int = 0
     closed: bool = False
-    _saturated_since: float | None = None
+    #: When the oldest update still queued for this client was queued: set as
+    #: the queue goes from empty to non-empty, cleared by every drain.
+    _waiting_since: float | None = None
 
     def offer(self, key: str, payload: Any) -> None:
         """Non-blocking publish. This is the hot path; it must never await."""
         if self.closed:
             return
+        if not self.pending:
+            self._waiting_since = time.monotonic()
         if key in self.pending:
             # The previous value for this key was never read. Dropping it is the
             # point: the client is about to receive something strictly newer.
@@ -94,27 +98,30 @@ class ClientSession:
             return []
         batch = list(self.pending.values())
         self.pending.clear()
+        self._waiting_since = None
         self.wakeup.clear()
         self.sent += len(batch)
         FRAMES_SENT.inc(len(batch))
         return batch
 
     def note_saturation(self, deadline_s: float) -> bool:
-        """True when this client has been behind for longer than the deadline.
+        """True when an update has waited for this client longer than the deadline.
 
         A client that conflates occasionally is fine - that is the mechanism
-        working. A client whose queue is *continuously* non-empty is not reading
-        at all (laptop asleep, connection black-holed) and is holding memory for
-        nothing. Disconnect it with an honest close code and let it reconnect.
+        working. A client that has not taken anything for the whole deadline is
+        not reading at all (laptop asleep, connection black-holed) and is holding
+        memory for nothing. Disconnect it with an honest close code and let it
+        reconnect.
+
+        The clock is the age of the oldest update still queued, not how long the
+        queue has looked non-empty. On a busy feed the queue is never empty when
+        the writer wakes - waking is what a new update does - so timing that
+        dropped every reader of a busy market after the deadline, however fast
+        it read.
         """
-        if not self.pending:
-            self._saturated_since = None
+        if not self.pending or self._waiting_since is None:
             return False
-        now = time.monotonic()
-        if self._saturated_since is None:
-            self._saturated_since = now
-            return False
-        return (now - self._saturated_since) > deadline_s
+        return (time.monotonic() - self._waiting_since) > deadline_s
 
     def subscribe(self, symbols: list[str]) -> set[str]:
         self.symbols.update(s.upper() for s in symbols)

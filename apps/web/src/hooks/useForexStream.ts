@@ -102,10 +102,15 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
         if (!live) return;
         switch (frame.type) {
           case "tick":
+            // The bar before the price: the chart's painter reads the minute
+            // when the price lands, and the price is conflated per frame.
+            if (frame.bar) store.applyForming(frame.s, { ...frame.bar, src: "stream" });
+            else store.applyQuote(frame.s, frame.m, frame.t);
             store.offer({ symbol: frame.s, bid: frame.b, ask: frame.a, mid: frame.m, ts: frame.t });
             break;
 
           case "vol": {
+            if (frame.bar) store.sealMinute(frame.s, frame.bar);
             store.setVol({
               symbol: frame.s,
               sigma: frame.sigma,
@@ -142,6 +147,8 @@ export function useForexStream(store: MarketStore, url: string, symbols: string[
             const bars: Record<string, readonly Bar[]> = {};
             for (const [symbol, snap] of Object.entries(frame.data)) {
               bars[symbol] = snap.bars ?? [];
+              store.mergeMinutes(symbol, snap.bars ?? []);
+              if (snap.forming) store.applyForming(symbol, { ...snap.forming, src: "stream" });
               store.setZHist(symbol, snap.zhist ?? []);
               store.seedRegime(symbol, snap.regime?.regime ?? "unknown");
               if (snap.quote?.mid !== undefined) {

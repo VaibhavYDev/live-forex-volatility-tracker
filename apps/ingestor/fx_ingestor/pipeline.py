@@ -13,14 +13,14 @@ Redis writes per tick
     XADD    stream:ticks MINID ~ <now - retention>   durable WAL -> Postgres
     HSET    q:{SYMBOL}                               snapshot cache (TTL)
     HSET    bar:{SYMBOL}:{bucket}                    in-progress bar (TTL)
-    PUBLISH ch:tick:{SYMBOL}                         fan-out to browsers
+    PUBLISH ch:tick:{SYMBOL}                         fan-out to browsers, with the bar so far
 
 ...and additionally, when a bar seals:
 
     ZADD    hist:{SYMBOL}:1m                         recent bars for cold start (TTL)
     ZADD    zhist:{SYMBOL}                           z-score series for the pane (TTL)
     HSET    vol:{SYMBOL}:1h                          volatility snapshot (TTL)
-    PUBLISH ch:vol:{SYMBOL}                          volatility fan-out
+    PUBLISH ch:vol:{SYMBOL}                          volatility fan-out, with the sealed bar
     SET     regime:{SYMBOL}                          detector state (DURABLE)
 
 ...and, on the rare bars where the regime actually changes:
@@ -297,6 +297,19 @@ class IngestPipeline:
                     "a": tick.ask,
                     "m": tick.mid,
                     "t": tick.ts_event.isoformat(),
+                    # The minute so far, from every tick this process has seen
+                    # in it. Cumulative, so a browser that only receives some of
+                    # these frames - the API conflates them for a slow reader,
+                    # the browser once more per frame it paints - still draws
+                    # the high and low it missed the ticks of.
+                    "bar": {
+                        "t": bucket_epoch,
+                        "o": st.bucket.open,
+                        "h": st.bucket.high,
+                        "l": st.bucket.low,
+                        "c": st.bucket.close,
+                        "n": st.bucket.tick_count,
+                    },
                 }
             ),
         )
@@ -305,19 +318,7 @@ class IngestPipeline:
         if sealed is not None:
             pipe.zadd(
                 keys.history(tick.symbol),
-                {
-                    json.dumps(
-                        {
-                            "t": int(sealed.bucket.timestamp()),
-                            "o": sealed.open,
-                            "h": sealed.high,
-                            "l": sealed.low,
-                            "c": sealed.close,
-                            "n": sealed.tick_count,
-                            "src": str(sealed.source),
-                        }
-                    ): int(sealed.bucket.timestamp())
-                },
+                {json.dumps(_bar_payload(sealed)): int(sealed.bucket.timestamp())},
             )
             # Bound the sorted set: keep the most recent 1_440 bars (24h of 1m).
             pipe.zremrangebyrank(keys.history(tick.symbol), 0, -1441)
@@ -422,7 +423,13 @@ class IngestPipeline:
             mapping={k: json.dumps(v) for k, v in payload.items()},
         )
         pipe.expire(keys.vol_state(st.symbol, "1h"), keys.TTL_VOL_S)
-        pipe.publish(keys.channel_vol(st.symbol), json.dumps(payload))
+        # The frame carries the sealed bar; the stored reading does not. It is
+        # the minute the history set just received, so a browser keeps its
+        # minutes current without a request, and gets every tick of a minute
+        # even when conflation dropped the last tick frames of it.
+        pipe.publish(
+            keys.channel_vol(st.symbol), json.dumps({**payload, "bar": _bar_payload(sealed)})
+        )
         self._queue_zhist(pipe, st, sealed)
         BARS_SEALED.labels(symbol=st.symbol).inc()
 
@@ -675,6 +682,19 @@ class IngestPipeline:
 
     async def refresh_depth_metric(self) -> None:
         STREAM_DEPTH.set(await self._redis.xlen(keys.STREAM_TICKS))
+
+
+def _bar_payload(bar: Bar) -> dict[str, object]:
+    """A sealed bar as the history set stores it and the vol frame carries it."""
+    return {
+        "t": int(bar.bucket.timestamp()),
+        "o": bar.open,
+        "h": bar.high,
+        "l": bar.low,
+        "c": bar.close,
+        "n": bar.tick_count,
+        "src": str(bar.source),
+    }
 
 
 def _transition_payload(transition: RegimeTransition) -> dict[str, object]:

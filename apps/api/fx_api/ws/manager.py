@@ -35,11 +35,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import datetime
 from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
 from fx_core import keys
+from fx_core.intervals import bucket_start
 
 from fx_api.ws.conflator import CLIENTS, ClientSession
 
@@ -193,6 +195,7 @@ class ConnectionManager:
             # showing different spans of time on the same screen.
             pipe.zrevrange(keys.zhist(symbol), 0, bars - 1)
         results = await pipe.execute()
+        forming = await self._forming(symbols, [results[i * fields] for i in range(len(symbols))])
 
         out: dict[str, Any] = {}
         for i, symbol in enumerate(symbols):
@@ -201,6 +204,11 @@ class ConnectionManager:
             out[symbol] = {
                 "quote": {k: _maybe_float(v) for k, v in (quote or {}).items()},
                 "bars": [json.loads(b) for b in reversed(history or [])],
+                # The minute the last tick went into, as the ingestor holds it:
+                # every tick of it, not one quote. A browser connecting mid-minute
+                # starts that candle from here instead of from the price alone,
+                # which drew a one-tick candle and lost the minute's range.
+                "forming": forming.get(symbol),
                 "vol": {k: json.loads(v) for k, v in (vol or {}).items()},
                 # The z series the pane draws on first paint. Without it a
                 # browser opening mid-session watches an empty chart fill in one
@@ -213,6 +221,48 @@ class ConnectionManager:
                 # to alerting.
                 "regime": _regime_from_snapshot(regime),
             }
+        return out
+
+    async def _forming(
+        self, symbols: list[str], quotes: list[dict[str, str] | None]
+    ) -> dict[str, dict[str, Any]]:
+        """The unsealed bar each symbol's last tick went into, where one is held.
+
+        A second round trip, because its key is named by the minute the quote
+        says. The bar can only be newer than the quote read just before it: if
+        the minute sealed in between, this reads the minute as it sealed, and
+        the frames queued behind the snapshot carry the next one.
+        """
+        minutes: dict[str, int] = {}
+        for symbol, quote in zip(symbols, quotes, strict=True):
+            try:
+                at = datetime.fromisoformat(str((quote or {})["ts"]))
+            except (KeyError, ValueError):
+                continue
+            minutes[symbol] = bucket_start(int(at.timestamp()), "1m")
+        if not minutes:
+            return {}
+
+        pipe = self._redis.pipeline(transaction=False)
+        for symbol, minute in minutes.items():
+            pipe.hgetall(keys.bar_bucket(symbol, minute))
+        held = await pipe.execute()
+
+        out: dict[str, dict[str, Any]] = {}
+        for (symbol, minute), raw in zip(minutes.items(), held, strict=True):
+            try:
+                out[symbol] = {
+                    "t": minute,
+                    "o": float(raw["o"]),
+                    "h": float(raw["h"]),
+                    "l": float(raw["l"]),
+                    "c": float(raw["c"]),
+                    "n": int(raw["n"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                # Expired an hour after its last tick: over a weekend there is
+                # no minute forming, and none is made up from the quote.
+                continue
         return out
 
 

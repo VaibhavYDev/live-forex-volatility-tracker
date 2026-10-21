@@ -117,6 +117,37 @@ class TestSaturationDetection:
         s.drain()
         assert not s.note_saturation(deadline_s=0.05)
 
+    def test_a_reader_keeping_up_with_a_busy_feed_is_never_saturated(self) -> None:
+        """The defect this pins: every reader of a busy market was dropped.
+
+        The writer wakes because an update arrived, so on a busy feed the queue
+        is never empty when it looks. Timing how long the queue LOOKED non-empty
+        disconnected a client that took every update at once, ten seconds in.
+        """
+        s = _session()
+        end = time.monotonic() + 0.25  # five deadlines
+        while time.monotonic() < end:
+            s.offer("tick:EURUSD", {"m": 1.08})  # an update arrives; the writer wakes
+            assert not s.note_saturation(deadline_s=0.05)
+            s.drain()  # and takes it at once
+            time.sleep(0.005)
+
+    def test_the_clock_is_the_age_of_the_oldest_queued_update(self) -> None:
+        s = _session()
+        s.offer("tick:EURUSD", {"m": 1.08})
+        time.sleep(0.04)
+        s.offer("tick:GBPUSD", {"m": 1.27})  # newer data does not restart the clock
+        assert not s.note_saturation(deadline_s=0.05)
+        time.sleep(0.03)
+        assert s.note_saturation(deadline_s=0.05)
+
+    def test_an_unsubscribe_that_empties_the_queue_is_not_a_backlog(self) -> None:
+        s = _session()
+        s.offer("tick:EURUSD", {"m": 1.08})
+        time.sleep(0.06)
+        s.unsubscribe(["EURUSD"])
+        assert not s.note_saturation(deadline_s=0.05)
+
 
 class _FlakyPubSub:
     """listen() fails once, as it does when Redis outlasts redis-py's own retries."""

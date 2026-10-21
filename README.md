@@ -329,6 +329,19 @@ allocates** — returning a fresh object or a `.filter()` result makes React see
 new value on every read and re-render forever — and the store suite pins that with
 identity assertions rather than trusting the discipline.
 
+**Every timeframe's last candle is live, and built from the ingestor's own OHLC.**
+Each tick frame carries the minute so far as the ingestor aggregates it — every
+tick it saw, so a frame dropped by either conflation layer loses no high or low —
+and each sealed-minute frame carries the bar the history set stores. The browser
+keeps one series of minutes per pair (the snapshot, then one request for the
+day of minutes the hot cache holds, then each sealed minute) and folds 1m to 30m
+from it with the server's own rules, so a timeframe switch is instant and asks
+the network for nothing. `apps/web/src/test/candle_parity.json` holds the server's
+folds, and both implementations are tested against it. 1D candles are the
+provider's days; today's is joined with the minutes we observed and labelled
+partial when any open-market minute of it has no bar. A minute with no bar is
+left out, never assumed to have stood still.
+
 > **Edge case: the rAF feed freeze.**
 > The flush runs inside a `requestAnimationFrame` callback, which is outside
 > React's call stack — **no error boundary can reach it.** An uncaught throw from
@@ -422,7 +435,7 @@ Every row has a branch in the code and a test in `tests/chaos/` or
 | Worker killed mid-batch | pending idle > 60 s | a survivor `XAUTOCLAIM`s the backlog | **none** — WAL holds 15 min | ≤ 60 s |
 | Postgres unavailable | commit raises | worker does **not** `XACK`; entries stay pending and retry | none while the WAL retains | automatic |
 | API replica killed | socket closes | browser reconnects with full jitter to another replica | none — snapshot-then-delta | seconds |
-| Browser cannot keep up | queue saturated > 10 s | conflate, then close `4003` | superseded prices only | client reconnects |
+| Browser cannot keep up | an update waits > 10 s, or a send blocks > 10 s | conflate, then close `4003` | superseded prices only | client reconnects |
 | Tab backgrounded | rAF stops firing | buffer conflates; client unsubscribes to save bandwidth | none | on focus |
 | A chart component throws | React error boundary | that pane shows a failure state; the rest of the terminal lives | none | "Try again" |
 | A tick listener throws | try/catch inside the flush | that chart stops painting; feed and other symbols unaffected | none | counted in `painterErrors` |

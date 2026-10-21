@@ -19,8 +19,10 @@ bounded by the number of *subscribed symbols* rather than by message rate. A
 dedicated writer task per client drains it at that client's own pace.
 
 Fast clients receive everything. Slow clients receive decimated but always *current*
-data. Nobody blocks anybody. A client whose queue stays saturated past a deadline is
-disconnected with close code 4003.
+data. Nobody blocks anybody. A client that leaves an update waiting past a deadline
+- measured from when the oldest queued update was queued, not from when the queue
+last looked non-empty, which on a busy feed is always - is disconnected with close
+code 4003.
 
 ## Alternatives rejected
 

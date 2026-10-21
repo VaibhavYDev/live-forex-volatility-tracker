@@ -51,8 +51,16 @@ beforeEach(() => {
   lwc.reset();
   vi.stubGlobal("WebSocket", FakeSocket);
   // VolatilityPanel polls this on mount; an unhandled rejection would surface as
-  // an unrelated failure.
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 409 }));
+  // an unrelated failure. The chart's history request is left pending: its
+  // answer would land after the test, outside act, and it has its own tests.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) =>
+      String(url).includes("/api/bars/")
+        ? new Promise(() => {})
+        : Promise.resolve({ ok: false, status: 409 }),
+    ),
+  );
 });
 
 describe("the assembled application", () => {
