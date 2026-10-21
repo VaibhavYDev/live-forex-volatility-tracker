@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pydantic
 import structlog
@@ -79,21 +80,40 @@ async def _writer(
                 await asyncio.wait_for(session.wakeup.wait(), timeout=1.0)
 
             if session.note_saturation(deadline_s):
-                SLOW_DISCONNECTS.inc()
-                log.warning(
-                    "ws.slow_client_dropped",
-                    client=session.client_id,
-                    conflated=session.conflated,
-                )
-                await ws.close(CloseCode.SLOW_CLIENT, "client too slow")
-                session.closed = True
+                await _drop_slow_client(ws, session, "backlog")
                 return
 
             async with send_lock:
-                for frame in session.drain():
-                    await ws.send_json(frame)
+                batch = session.drain()
+                try:
+                    # A client whose socket stops accepting data blocks this
+                    # send, and a writer stuck in it never reaches the check
+                    # above. The same deadline bounds the send itself.
+                    await asyncio.wait_for(_send_all(ws, batch), timeout=deadline_s)
+                except TimeoutError:
+                    await _drop_slow_client(ws, session, "send")
+                    return
     except (WebSocketDisconnect, RuntimeError):
         session.closed = True
+
+
+async def _send_all(ws: WebSocket, frames: list[Any]) -> None:
+    for frame in frames:
+        await ws.send_json(frame)
+
+
+async def _drop_slow_client(ws: WebSocket, session: ClientSession, cause: str) -> None:
+    SLOW_DISCONNECTS.inc()
+    log.warning(
+        "ws.slow_client_dropped",
+        client=session.client_id,
+        conflated=session.conflated,
+        cause=cause,
+    )
+    session.closed = True
+    # Bounded: the close frame goes down the same socket that stopped taking data.
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(ws.close(CloseCode.SLOW_CLIENT, "client too slow"), timeout=1.0)
 
 
 @router.websocket("/ws/stream")

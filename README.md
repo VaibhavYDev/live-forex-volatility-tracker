@@ -405,7 +405,7 @@ Every row has a branch in the code and a test in `tests/chaos/` or
 | Worker killed mid-batch | pending idle > 60 s | a survivor `XAUTOCLAIM`s the backlog | **none** — WAL holds 15 min | ≤ 60 s |
 | Postgres unavailable | commit raises | worker does **not** `XACK`; entries stay pending and retry | none while the WAL retains | automatic |
 | API replica killed | socket closes | browser reconnects with full jitter to another replica | none — snapshot-then-delta | seconds |
-| Browser cannot keep up | queue saturated > 10 s | conflate, then close `4003` | superseded prices only | client reconnects |
+| Browser cannot keep up | an update waits > 10 s, or a send blocks > 10 s | conflate, then close `4003` | superseded prices only | client reconnects |
 | Tab backgrounded | rAF stops firing | buffer conflates; client unsubscribes to save bandwidth | none | on focus |
 | A chart component throws | React error boundary | that pane shows a failure state; the rest of the terminal lives | none | "Try again" |
 | A tick listener throws | try/catch inside the flush | that chart stops painting; feed and other symbols unaffected | none | counted in `painterErrors` |
