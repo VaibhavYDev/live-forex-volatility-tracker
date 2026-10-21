@@ -9,6 +9,7 @@ import type {
   Vol,
   ZPoint,
 } from "./types";
+import { MinuteBook } from "./minutes";
 
 /**
  * Market state outside React.
@@ -46,6 +47,8 @@ const vKey = (s: string) => `v:${s}`;
 const aKey = (s: string) => `a:${s}`;
 const bKey = (s: string) => `b:${s}`;
 const zKey = (s: string) => `z:${s}`;
+const mKey = (s: string) => `m:${s}`;
+const dKey = (s: string) => `d:${s}`;
 const FEED = "feed";
 const CONN = "conn";
 
@@ -71,6 +74,12 @@ export class MarketStore {
   #alerts = new Map<string, readonly Transition[]>();
   #bars = new Map<string, readonly Bar[]>();
   #z = new Map<string, readonly ZPoint[]>();
+  #books = new Map<string, MinuteBook>();
+  /** Bumped when a pair's minutes may have a hole only the history request can fill. */
+  #gen = new Map<string, number>();
+  /** The generation each pair's history was last loaded at. */
+  #loaded = new Map<string, number>();
+  #daily = new Map<string, { bars: readonly Bar[]; at: number }>();
   #feed: FeedStatus = { state: "unknown" };
   #conn: Conn = { state: "connecting", attempt: 0 };
 
@@ -99,6 +108,17 @@ export class MarketStore {
   alerts = (s: string): readonly Transition[] => this.#alerts.get(s) ?? NO_ALERTS;
   bars = (s: string): readonly Bar[] => this.#bars.get(s) ?? NO_BARS;
   zhist = (s: string): readonly ZPoint[] => this.#z.get(s) ?? NO_Z;
+  /** Sealed (and just-ended provisional) one-minute bars, oldest first. */
+  minutes = (s: string): readonly Bar[] => this.#books.get(s)?.sorted() ?? NO_BARS;
+  /** The minute in progress, as the ingestor aggregates it. Read by the chart's
+   *  tick painter, so it is not a render topic: it changes on every tick. */
+  forming = (s: string): Bar | undefined => this.#books.get(s)?.forming;
+  minuteGen = (s: string): number => this.#gen.get(s) ?? 0;
+  /** True until the history request has filled this pair's minutes. */
+  needsHistory = (s: string): boolean => this.#loaded.get(s) !== this.minuteGen(s);
+  daily = (s: string): readonly Bar[] => this.#daily.get(s)?.bars ?? NO_BARS;
+  /** When the daily series was fetched (ms), or 0. */
+  dailyAt = (s: string): number => this.#daily.get(s)?.at ?? 0;
   feed = (): FeedStatus => this.#feed;
   conn = (): Conn => this.#conn;
 
@@ -118,6 +138,8 @@ export class MarketStore {
   subAlerts = (s: string, cb: () => void) => this.subscribe(aKey(s), cb);
   subBars = (s: string, cb: () => void) => this.subscribe(bKey(s), cb);
   subZ = (s: string, cb: () => void) => this.subscribe(zKey(s), cb);
+  subMinutes = (s: string, cb: () => void) => this.subscribe(mKey(s), cb);
+  subDaily = (s: string, cb: () => void) => this.subscribe(dKey(s), cb);
   subFeed = (cb: () => void) => this.subscribe(FEED, cb);
   subConn = (cb: () => void) => this.subscribe(CONN, cb);
 
@@ -201,6 +223,109 @@ export class MarketStore {
     // Anything that arrived while we were painting.
     if (this.#buf.size > 0) this.#schedule();
   };
+
+  // --------------------------------------------------------------- minutes
+  #book(s: string): MinuteBook {
+    let book = this.#books.get(s);
+    if (!book) this.#books.set(s, (book = new MinuteBook()));
+    return book;
+  }
+
+  #touchMinutes(s: string): void {
+    this.#dirty.add(mKey(s));
+    this.#emit();
+  }
+
+  /**
+   * The minute so far, from a tick frame or the snapshot. Hot path: applied on
+   * arrival rather than in the rAF flush, so the frame conflation in `offer`
+   * cannot lose the last bar of a minute.
+   *
+   * Every bar is cumulative, so a newer one replaces an older one outright. An
+   * older minute, or the same minute with fewer ticks, is stale - a snapshot
+   * read before the frames queued behind it - and changes nothing. When the
+   * minute moves on, the one that ended is held provisionally until its sealed
+   * bar arrives, so its candle never loses the range it had.
+   */
+  applyForming(s: string, bar: Bar): void {
+    const book = this.#book(s);
+    const cur = book.forming;
+    if (cur && (bar.t < cur.t || (bar.t === cur.t && bar.n < cur.n))) return;
+    if (book.sealed(bar.t)) return;
+    book.forming = bar;
+    if (cur && bar.t > cur.t && book.provisional(cur)) this.#touchMinutes(s);
+  }
+
+  /**
+   * A server that predates the forming bar sends prices only. The minute is
+   * then built from the prices that reached us - the old behaviour, kept so a
+   * rolled-back ingestor leaves a moving chart. Its tick count stays zero
+   * rather than counting frames as if they were ticks.
+   */
+  applyQuote(s: string, mid: number, ts: string): void {
+    const t = Math.floor(Date.parse(ts) / 60_000) * 60;
+    const cur = this.#books.get(s)?.forming;
+    const bar =
+      cur && cur.t === t
+        ? { ...cur, h: Math.max(cur.h, mid), l: Math.min(cur.l, mid), c: mid }
+        : { t, o: mid, h: mid, l: mid, c: mid, n: 0, src: "stream" };
+    this.applyForming(s, bar);
+  }
+
+  /** A minute the ingestor sealed: final, and every tick of it. */
+  sealMinute(s: string, bar: Bar): void {
+    const book = this.#book(s);
+    let changed = book.put(bar);
+    const f = book.forming;
+    if (f && f.t <= bar.t) {
+      // Frames for that minute were missed; hold what we had of it.
+      if (f.t < bar.t) changed = book.provisional(f) || changed;
+      book.forming = undefined;
+    }
+    if (changed) this.#touchMinutes(s);
+  }
+
+  /**
+   * Minutes from the snapshot or the history request. A snapshot that does not
+   * reach back to the newest minute already held leaves a hole - the tab was
+   * hidden, or the socket was down, for longer than it covers - which only the
+   * history request can fill, so the pair is marked for one.
+   */
+  mergeMinutes(s: string, bars: readonly Bar[], from: "snapshot" | "history" = "snapshot"): void {
+    const book = this.#book(s);
+    const newest = book.newest;
+    if (from === "snapshot" && newest !== undefined && bars.length > 0 && bars[0]!.t > newest) {
+      this.#gen.set(s, this.minuteGen(s) + 1);
+      this.#dirty.add(mKey(s));
+    }
+    let changed = false;
+    for (const bar of bars) changed = book.put(bar) || changed;
+    if (bars.length > 0) {
+      // Authoritative over the span it covers: a minute held only
+      // provisionally inside it was never sealed and never will be.
+      const present = new Set(bars.map((b) => b.t));
+      const from = Math.min(...present);
+      const to = Math.max(...present);
+      changed = book.dropUnsealed(from, to, present) || changed;
+    }
+    const f = book.forming;
+    if (f && book.sealed(f.t)) book.forming = undefined;
+    if (changed) this.#dirty.add(mKey(s));
+    this.#emit();
+  }
+
+  /** Record that the history request for generation `gen` has been merged. */
+  historyLoaded(s: string, gen: number): void {
+    if (this.#loaded.get(s) === gen) return;
+    this.#loaded.set(s, gen);
+    this.#touchMinutes(s);
+  }
+
+  setDaily(s: string, bars: readonly Bar[], at = Date.now()): void {
+    this.#daily.set(s, { bars: Object.freeze([...bars]), at });
+    this.#dirty.add(dKey(s));
+    this.#emit();
+  }
 
   // -------------------------------------------------------- structural sets
   setVol(v: Vol): void {
@@ -306,6 +431,9 @@ export class MarketStore {
     this.#bars.clear();
     this.#z.clear();
     this.#buf.clear();
+    for (const book of this.#books.values()) book.clear();
+    for (const s of this.#books.keys()) this.#gen.set(s, this.minuteGen(s) + 1);
+    this.#daily.clear();
     for (const topic of this.#subs.keys()) this.#dirty.add(topic);
     this.#emit();
   }
@@ -354,6 +482,10 @@ export class MarketStore {
     this.#alerts.clear();
     this.#bars.clear();
     this.#z.clear();
+    this.#books.clear();
+    this.#gen.clear();
+    this.#loaded.clear();
+    this.#daily.clear();
     this.#buf.clear();
     this.#dirty.clear();
     this.#subs.clear();

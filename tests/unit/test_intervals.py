@@ -14,8 +14,10 @@ import pytest
 from fx_core.intervals import INTERVALS, ORDER, base_count, bucket_start, fold
 
 
-def bar(t: int, o: float, h: float, low: float, c: float, n: int = 1) -> dict[str, object]:
-    return {"t": t, "o": o, "h": h, "l": low, "c": c, "n": n, "src": "replay"}
+def bar(
+    t: int, o: float, h: float, low: float, c: float, n: int = 1, src: str = "replay"
+) -> dict[str, object]:
+    return {"t": t, "o": o, "h": h, "l": low, "c": c, "n": n, "src": src}
 
 
 def ts(spec: str) -> int:
@@ -134,6 +136,61 @@ class TestFold:
         ]
         fold(base, "1h")
         assert base[0]["n"] == 5 and base[0]["h"] == 1.12
+
+
+class TestProvenance:
+    """A folded candle must not claim a single source it does not have."""
+
+    def test_a_bucket_from_one_source_keeps_it(self) -> None:
+        base = [
+            bar(ts("2026-03-11T10:00:00"), 1, 1, 1, 1, src="stream"),
+            bar(ts("2026-03-11T10:01:00"), 1, 1, 1, 1, src="stream"),
+        ]
+        assert fold(base, "5m")[0]["src"] == "stream"
+
+    def test_history_turning_live_inside_a_bucket_is_mixed(self) -> None:
+        # The 15m candle the stream joined halfway through used to be labelled
+        # "backfill" because its first minute was, and the chart called the
+        # whole candle provider history.
+        base = [
+            bar(ts("2026-03-11T10:00:00"), 1, 1, 1, 1, n=0, src="backfill"),
+            bar(ts("2026-03-11T10:07:00"), 1, 1, 1, 1, n=9, src="stream"),
+        ]
+        [out] = fold(base, "15m")
+        assert out["src"] == "mixed"
+        assert out["n"] == 9, "history contributes no ticks; none are invented"
+
+    def test_mixed_does_not_leak_into_the_next_bucket(self) -> None:
+        base = [
+            bar(ts("2026-03-11T10:00:00"), 1, 1, 1, 1, src="backfill"),
+            bar(ts("2026-03-11T10:04:00"), 1, 1, 1, 1, src="stream"),
+            bar(ts("2026-03-11T10:05:00"), 1, 1, 1, 1, src="stream"),
+        ]
+        assert [b["src"] for b in fold(base, "5m")] == ["mixed", "stream"]
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_history_and_live_for_the_same_minute_fold_in_a_fixed_order(
+        self, reverse: bool
+    ) -> None:
+        # The provider's bar covers the minute from its first second; ours may
+        # have joined mid-minute. Open from the provider, close from the stream,
+        # extremes from both - whatever order the cache returned them in.
+        minute = ts("2026-03-11T10:03:00")
+        base = [
+            bar(minute, o=1.10, h=1.20, low=1.05, c=1.15, n=0, src="backfill"),
+            bar(minute, o=1.14, h=1.18, low=1.01, c=1.16, n=4, src="stream"),
+        ]
+        if reverse:
+            base.reverse()
+        [out] = fold(base, "5m")
+        assert (out["o"], out["h"], out["l"], out["c"], out["n"], out["src"]) == (
+            1.10,
+            1.20,
+            1.01,
+            1.16,
+            4,
+            "mixed",
+        )
 
 
 def test_every_ordered_code_is_a_real_interval() -> None:

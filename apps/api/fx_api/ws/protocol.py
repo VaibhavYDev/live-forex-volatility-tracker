@@ -12,9 +12,15 @@ CLIENT -> SERVER
 
 SERVER -> CLIENT
     {"type": "hello",    "protocol": 1, "server_time": "..."}
-    {"type": "snapshot", "data": {...}}      <- quote, bars, vol, regime, zhist
+    {"type": "snapshot", "data": {...}}      <- quote, bars, forming, vol, regime, zhist
     {"type": "tick",     "s": "EURUSD", ...} <- deltas from that point on
     {"type": "vol",      "s": "EURUSD", ...}
+
+    A tick frame's `bar` is the minute so far ({t, o, h, l, c, n}), cumulative
+    over every tick, so any one frame is enough; a vol frame's `bar` is the
+    minute it sealed, as the history set stores it; the snapshot's `forming` is
+    the minute in progress, or null. All three are additions: a client that
+    ignores them sees protocol 1 exactly as before.
     {"type": "status",   "state": "healthy|degraded|fatal|stopped", ...}
     {"type": "error",    "message": "..."}
 """

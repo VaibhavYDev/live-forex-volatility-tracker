@@ -89,6 +89,17 @@ def fold(bars: list[dict[str, Any]], interval: str) -> list[dict[str, Any]]:
 
     Input must be ascending by `t`. Partial trailing buckets are returned — the
     current hour is legitimately incomplete and the chart should show it forming.
+
+    `src` says where the bucket's minutes came from: the shared source when they
+    agree, "mixed" when provider history and our own stream both contributed. A
+    bucket labelled by its first minute alone called a candle that turned live
+    halfway through "provider history".
+
+    Within one minute, provider history sorts before a live bar for the same
+    minute: the provider's bar covers the minute from its start, ours may have
+    begun mid-minute, so the open comes from the first and the close from the
+    second. The web client's fold (apps/web/src/lib/candles.ts) uses the same
+    order, so both sides draw the same candle from the same minutes.
     """
     if interval not in INTERVALS:
         raise ValueError(f"unknown interval: {interval}")
@@ -96,7 +107,7 @@ def fold(bars: list[dict[str, Any]], interval: str) -> list[dict[str, Any]]:
         return []
 
     out: list[dict[str, Any]] = []
-    for bar in sorted(bars, key=lambda b: int(b["t"])):
+    for bar in sorted(bars, key=_fold_order):
         start = bucket_start(int(bar["t"]), interval)
         if out and out[-1]["t"] == start:
             cur = out[-1]
@@ -104,6 +115,8 @@ def fold(bars: list[dict[str, Any]], interval: str) -> list[dict[str, Any]]:
             cur["l"] = min(cur["l"], bar["l"])
             cur["c"] = bar["c"]  # last close wins
             cur["n"] += bar.get("n", 0)
+            if cur["src"] != bar.get("src", "agg"):
+                cur["src"] = "mixed"
         else:
             out.append(
                 {
@@ -117,6 +130,11 @@ def fold(bars: list[dict[str, Any]], interval: str) -> list[dict[str, Any]]:
                 }
             )
     return out
+
+
+def _fold_order(bar: dict[str, Any]) -> tuple[int, int]:
+    """Time, then provider history before anything observed live in the same minute."""
+    return int(bar["t"]), 0 if bar.get("src") == "backfill" else 1
 
 
 #: Bar duration of each stored base series.

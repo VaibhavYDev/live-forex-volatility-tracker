@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import random
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -175,6 +176,72 @@ class TestMarketRest:
         for c in body["bars"]:
             assert c["t"] % seconds == 0
             assert c["l"] <= min(c["o"], c["c"]) <= max(c["o"], c["c"]) <= c["h"]
+
+    @pytest.mark.parametrize("interval", [i for i in ORDER if i != "1d"])
+    @pytest.mark.parametrize("symbol", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"])
+    def test_every_intraday_candle_is_its_minutes(
+        self, client: TestClient, redis_sync: Any, symbol: str, interval: str
+    ) -> None:
+        """Checked against a grouping done here, not against fold() itself.
+
+        The browser folds the same minutes into the same candles; the two agree
+        through apps/web/src/test/candle_parity.json.
+        """
+        rng = random.Random(symbol)
+        start = int(datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp())
+        price = 150.0 if symbol.endswith("JPY") else 1.08
+        minutes = []
+        for i in range(180):
+            if rng.random() < 0.1:
+                continue  # nothing arrived: left out, not filled
+            o, c = price, price * (1 + rng.uniform(-3e-4, 3e-4))
+            h, low = max(o, c) * (1 + rng.uniform(0, 2e-4)), min(o, c) * (1 - rng.uniform(0, 2e-4))
+            src = "backfill" if i < 50 else "stream"
+            n = 0 if src == "backfill" else rng.randint(1, 60)
+            minutes.append(
+                {"t": start + i * 60, "o": o, "h": h, "l": low, "c": c, "n": n, "src": src}
+            )
+            price = c
+        redis_sync.zadd(keys.history(symbol), {json.dumps(m): m["t"] for m in minutes})
+
+        body = client.get(f"/api/bars/{symbol}?interval={interval}&limit=1440").json()
+
+        seconds = INTERVALS[interval].seconds
+        assert seconds is not None
+        groups: dict[int, list[dict[str, Any]]] = {}
+        for m in minutes:
+            groups.setdefault(m["t"] - m["t"] % seconds, []).append(m)
+        expected = [
+            {
+                "t": t,
+                "o": ms[0]["o"],
+                "h": max(m["h"] for m in ms),
+                "l": min(m["l"] for m in ms),
+                "c": ms[-1]["c"],
+                "n": sum(m["n"] for m in ms),
+                "src": ms[0]["src"] if len({m["src"] for m in ms}) == 1 else "mixed",
+            }
+            for t, ms in sorted(groups.items())
+        ]
+        assert body["bars"] == expected
+
+    def test_a_candle_the_stream_joined_is_labelled_mixed(
+        self, client: TestClient, redis_sync: Any
+    ) -> None:
+        # Labelled by its first minute, this candle was "provider history"
+        # although eight of its fifteen minutes came from our own stream.
+        start = int(datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp())
+        members = {}
+        for i in range(15):
+            src = "backfill" if i < 7 else "stream"
+            bar = {"t": start + i * 60, "o": 1.08, "h": 1.081, "l": 1.079, "c": 1.0805}
+            members[json.dumps({**bar, "n": 0 if src == "backfill" else 9, "src": src})] = bar["t"]
+        redis_sync.zadd(keys.history(SYMBOL), members)
+
+        [candle] = client.get(f"/api/bars/{SYMBOL}?interval=15m").json()["bars"]
+
+        assert candle["src"] == "mixed"
+        assert candle["n"] == 8 * 9, "the provider's minutes add no ticks"
 
     def test_an_unknown_symbol_is_empty_rather_than_an_error(self, client: TestClient) -> None:
         body = client.get("/api/bars/GBPUSD").json()

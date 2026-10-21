@@ -19,8 +19,8 @@ import { useRef, type KeyboardEvent } from "react";
 export const TIMEFRAMES = ["1m", "3m", "5m", "10m", "15m", "30m", "1d"] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
 
-/** Only 1-minute has a live in-progress candle: the WebSocket carries ticks for
- *  the current minute, and coarser buckets are folded server-side on request. */
+/** The timeframe a chart opens on. Every timeframe's newest candle is live:
+ *  all of them are folded from the same minutes, the forming one included. */
 export const LIVE_TF: Timeframe = "1m";
 
 const LABEL: Record<Timeframe, string> = {

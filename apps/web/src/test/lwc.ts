@@ -6,6 +6,7 @@ export const timeScale = {
   fitContent: vi.fn(),
   applyOptions: vi.fn(),
   setVisibleRange: vi.fn(),
+  setVisibleLogicalRange: vi.fn(),
   scrollToRealTime: vi.fn(),
 };
 
