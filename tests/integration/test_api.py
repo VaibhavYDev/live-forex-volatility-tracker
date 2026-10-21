@@ -17,6 +17,7 @@ import asyncio
 import json
 import math
 import random
+import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -26,8 +27,10 @@ import pytest
 from fastapi.testclient import TestClient
 from fx_api.config import ApiSettings
 from fx_api.main import create_app
+from fx_api.routers import stream as stream_router
 from fx_api.routers.market import _Cache, _compare_cache
 from fx_api.ws.manager import ConnectionManager
+from fx_api.ws.protocol import CloseCode
 from fx_core import keys
 from fx_core.intervals import INTERVALS, ORDER
 from fx_core.models import Bar, BarSource, bars_per_year
@@ -87,6 +90,17 @@ def client(redis_sync: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
     with TestClient(create_app()) as c:
         yield c
     _compare_cache.clear()
+
+
+@pytest.fixture
+def brisk(redis_sync: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """The real app with a short slow-client deadline, so a test can outlast it."""
+    monkeypatch.setenv("REDIS_URL", REDIS_URL)
+    monkeypatch.setenv(TICKET_REQUIRED_ENV, "0")
+    monkeypatch.setenv("FX_WS_SLOW_CLIENT_DEADLINE_S", "0.4")
+
+    with TestClient(create_app()) as c:
+        yield c
 
 
 @pytest.fixture
@@ -576,6 +590,63 @@ class TestWebSocketProtocol:
             ws.send_json({"op": "unsubscribe", "symbols": [SYMBOL]})
             ws.send_json({"op": "ping"})
             assert ws.receive_json()["type"] == "pong"
+
+
+class TestSlowClients:
+    def test_a_reader_keeping_up_with_a_busy_feed_stays_connected(
+        self, brisk: TestClient, redis_sync: Any
+    ) -> None:
+        """Every browser on a busy market was closed `4003` ten seconds in.
+
+        Measured on the running stack: a reader taking 95 frames with no gap
+        over half a second was dropped as "too slow" after 10.3 s. Here the
+        deadline is 0.4 s and the feed runs for five of them.
+        """
+        stop = threading.Event()
+
+        def publish() -> None:
+            i = 0
+            while not stop.is_set():
+                frame = {"s": SYMBOL, "b": 1.0841, "a": 1.0842, "m": 1.08415 + i * 1e-6}
+                redis_sync.publish(keys.channel_tick(SYMBOL), json.dumps(frame))
+                i += 1
+                time.sleep(0.01)
+
+        received = 0
+        with brisk.websocket_connect("/ws/stream") as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"op": "subscribe", "symbols": [SYMBOL], "bars": 0})
+            assert ws.receive_json()["type"] == "snapshot"
+            feed = threading.Thread(target=publish, daemon=True)
+            feed.start()
+            try:
+                end = time.monotonic() + 2.0
+                while time.monotonic() < end:
+                    # A 4003 here raises WebSocketDisconnect and fails the test.
+                    assert ws.receive_json()["type"] == "tick"
+                    received += 1
+            finally:
+                stop.set()
+                feed.join()
+        assert received > 50, "the feed must have been busy for the whole run"
+
+    def test_a_client_whose_socket_stops_taking_data_is_dropped(
+        self, brisk: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A send that never completes is what a black-holed or asleep client
+        # looks like from here. The writer used to wait in it indefinitely.
+        async def never_completes(ws: Any, frames: list[Any]) -> None:
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(stream_router, "_send_all", never_completes)
+        with brisk.websocket_connect("/ws/stream") as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"op": "subscribe", "symbols": [SYMBOL], "bars": 0})
+            assert ws.receive_json()["type"] == "snapshot"
+            redis_sync.publish(keys.channel_tick(SYMBOL), json.dumps({"s": SYMBOL, "m": 1.08}))
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_json()
+        assert closed.value.code == CloseCode.SLOW_CLIENT
 
 
 class TestWebSocketAuth:
