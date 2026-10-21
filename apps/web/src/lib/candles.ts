@@ -166,35 +166,60 @@ function openHours(day: number): boolean[] {
   return Array.from({ length: 24 }, (_, h) => isMarketOpen(day + h * 3_600));
 }
 
+/** The first and last minute of `day` the market was open, or null if it was shut all day. */
+function openSpan(day: number): [number, number] | null {
+  const hours = openHours(day);
+  const first = hours.indexOf(true);
+  if (first < 0) return null;
+  return [day + first * 3_600, day + hours.lastIndexOf(true) * 3_600 + 3_540];
+}
+
 /**
- * Today's candle: the provider's daily bar for today, if any, joined with the
- * minutes we observed today. The provider's bar covers today from midnight to
- * its last refresh (hourly, server-side); ours cover what the stream saw. Their
- * union keeps every high and low either saw, and the close is ours, the newer.
+ * A day's candle: the provider's daily bar for it, if any, joined with the
+ * minutes we observed. The provider's bar covers the day from midnight to its
+ * last refresh (hourly, server-side); ours cover what the stream saw. The high
+ * and low are the union, so nothing either saw is lost. The open is ours when
+ * we saw the day's first open minute, and the close of a day that has `ended`
+ * is ours when we saw its last; otherwise each comes from the provider, which
+ * saw what we did not. A day still in progress closes on our newest minute.
  */
 export function dayCandle(
   daily: readonly Bar[],
   minutes: readonly Bar[],
   day: number,
   before = Number.POSITIVE_INFINITY,
+  ended = false,
 ): Bar | null {
   const at = lowerBound(daily, day);
   const provider = daily[at]?.t === day ? daily[at]! : null;
   const observed = bucketOf(minutes, day, DAY_S, before);
-  const parts = [provider, observed].filter((b): b is Bar => b !== null);
-  return parts.length > 0 ? { ...join(parts), t: day } : null;
+  if (!provider || !observed) return provider ?? observed;
+  const span = openSpan(day);
+  const first = minutes[lowerBound(minutes, day)]!;
+  const last = minutes[lowerBound(minutes, Math.min(day + DAY_S, before)) - 1]!;
+  return {
+    t: day,
+    o: first.t === span?.[0] ? observed.o : provider.o,
+    h: Math.max(provider.h, observed.h),
+    l: Math.min(provider.l, observed.l),
+    c: !ended || last.t === span?.[1] ? observed.c : provider.c,
+    n: observed.n,
+    src: provider.src === observed.src ? provider.src : "mixed",
+  };
 }
 
 /**
  * The 1D series: the provider's days, with today's reconciled against the
  * minutes we hold, and how complete today is.
  *
- * Days before today are the provider's, as `/api/bars?interval=1d` serves them.
- * Today is complete only if we hold a bar for every open-market minute of it
- * that has ended; anything less and its high and low are only what was
- * observed, which the chart says. A missing minute is never taken to have
- * stood still. The minute still forming counts as held: it has not sealed only
- * because the next tick has not arrived yet.
+ * Days before today are the provider's, as `/api/bars?interval=1d` serves them,
+ * joined with any minutes we still hold of them, so the day that just ended
+ * keeps the candle it closed as rather than the provider's bar as its last
+ * refresh left it. Today is complete only if we hold a bar for every
+ * open-market minute of it that has ended; anything less and its high and low
+ * are only what was observed, which the chart says. A missing minute is never
+ * taken to have stood still. The minute still forming counts as held: it has
+ * not sealed only because the next tick has not arrived yet.
  */
 export function dailySeries(
   daily: readonly Bar[],
@@ -203,7 +228,10 @@ export function dailySeries(
   forming?: Bar,
 ): { bars: Bar[]; coverage: Coverage | null } {
   const today = bucketStart(nowSec, DAY_S);
-  const past = daily.filter((b) => b.t < today);
+  const held = minutes.length > 0 ? bucketStart(minutes[0]!.t, DAY_S) : today;
+  const past = daily
+    .filter((b) => b.t < today)
+    .map((b) => (b.t >= held ? dayCandle(daily, minutes, b.t, undefined, true)! : b));
   const candle = dayCandle(daily, minutes, today);
 
   const elapsed = bucketStart(nowSec, MINUTE_S);
