@@ -431,6 +431,14 @@ describe("the daily rollover at 00:00 UTC", () => {
     expect(bars.at(-1)!.t).toBe(D);
   });
 
+  it("keeps yesterday from our minutes when the provider has no bar for it yet", () => {
+    const today = path(1.1, D, 1_440);
+    const older = { t: D - DAY_S, o: 1.1, h: 1.11, l: 1.09, c: 1.1, n: 0, src: "backfill" };
+    const { bars } = dailySeries([older], today, NEXT + 30);
+    expect(bars.map((b) => b.t)).toEqual([D - DAY_S, D]);
+    expect(bars[1]).toEqual(dayCandle([], today, D));
+  });
+
   it("takes from the provider what our minutes did not see of a finished day", () => {
     const full = path(1.1, D, 1_440);
     const provider = providerAsOf(full, D, NEXT, 1);

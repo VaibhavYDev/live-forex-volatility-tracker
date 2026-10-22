@@ -215,8 +215,9 @@ export function dayCandle(
  * Days before today are the provider's, as `/api/bars?interval=1d` serves them,
  * joined with any minutes we still hold of them, so the day that just ended
  * keeps the candle it closed as rather than the provider's bar as its last
- * refresh left it. Today is complete only if we hold a bar for every
- * open-market minute of it that has ended; anything less and its high and low
+ * refresh left it, or ours alone before the provider has a bar for it. Today
+ * is complete only if we hold a bar for every open-market minute of it that
+ * has ended; anything less and its high and low
  * are only what was observed, which the chart says. A missing minute is never
  * taken to have stood still. The minute still forming counts as held: it has
  * not sealed only because the next tick has not arrived yet.
@@ -229,9 +230,11 @@ export function dailySeries(
 ): { bars: Bar[]; coverage: Coverage | null } {
   const today = bucketStart(nowSec, DAY_S);
   const held = minutes.length > 0 ? bucketStart(minutes[0]!.t, DAY_S) : today;
-  const past = daily
-    .filter((b) => b.t < today)
-    .map((b) => (b.t >= held ? dayCandle(daily, minutes, b.t, undefined, true)! : b));
+  const past = daily.filter((b) => b.t < Math.min(held, today));
+  for (let day = held; day < today; day += DAY_S) {
+    const ended = dayCandle(daily, minutes, day, undefined, true);
+    if (ended) past.push(ended);
+  }
   const candle = dayCandle(daily, minutes, today);
 
   const elapsed = bucketStart(nowSec, MINUTE_S);
