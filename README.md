@@ -409,6 +409,12 @@ the answer.
 * **Crash-safe and single-runner.** A PostgreSQL advisory lock serialises runs; a
   run that dies leaves valid rows, and the next one repairs the rest (stale
   rollups, the Redis hot cache) without asking the provider again.
+* **Within the account's request allowance.** Every REST request made with the
+  token - the leader's history loads, its hourly refresh, recovery and the CLI - is
+  counted in one Redis ledger (`fx_ingestor/quota.py`). The feed's own requests are
+  never refused; recovery takes one only while the rolling hour and day leave the
+  reserve (30 of 50 an hour, 400 of 1,000 a day by default), otherwise it waits for
+  a later run. A span asked for within the last hour is not asked for again yet.
 
 It is off unless `FX_RECOVERY_MODE` says otherwise: `dry_run` reports what it
 would fetch and write, `apply` writes. A bounded window can also be recovered by

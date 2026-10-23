@@ -27,6 +27,7 @@ from fx_ingestor.providers import (
     ProviderError,
     ProviderRateLimitError,
 )
+from fx_ingestor.quota import QuotaLimits, RequestQuota
 from fx_ingestor.recovery import (
     LOCK_KEY,
     MINUTE,
@@ -129,6 +130,7 @@ def recovery(
     now: datetime,
     symbols: list[str] | None = None,
     stop: asyncio.Event | None = None,
+    quota: RequestQuota | None = None,
     **cfg: Any,
 ) -> HistoryRecovery:
     async def no_wait(_s: float) -> None:
@@ -144,6 +146,7 @@ def recovery(
         clock=lambda: now,
         sleep=no_wait,
         stop=stop,
+        quota=quota,
     )
 
 
@@ -348,8 +351,15 @@ async def test_minutes_the_provider_lacks_stay_missing_until_settled(
     assert (first.status, first.bars_inserted, first.minutes_silent) == ("succeeded", 50, 10)
     assert [r.status for r in first.spans] == ["partial"]
 
-    # Fetched only 20 minutes after the gap: the provider may still publish it. Ask again.
-    second = await recovery(pg, redis, provider, at(day, 11, 49), ["EURUSD"]).run_once(
+    # Fetched only 20 minutes after the gap: the provider may still publish it. Not on
+    # every run, though: the next run within the hour leaves it alone.
+    soon = await recovery(pg, redis, provider, at(day, 11, 49), ["EURUSD"]).run_once(
+        "periodic", apply=True, window=window
+    )
+    assert soon.status == "idle" and len(provider.calls) == 1
+
+    # An hour after it was asked for: ask again.
+    second = await recovery(pg, redis, provider, at(day, 12, 20), ["EURUSD"]).run_once(
         "periodic", apply=True, window=window
     )
     assert second.minutes_missing == 10 and [r.status for r in second.spans] == ["silent"]
@@ -512,6 +522,87 @@ async def test_a_rate_limit_keeps_what_was_fetched_and_waits(
 
     assert report.status == "partial" and report.bars_inserted == 60 and len(provider.calls) == 2
     assert rec.blocked_until == now + timedelta(seconds=1800)
+
+
+async def test_a_failed_request_is_asked_again_only_after_the_hour(
+    pg: asyncpg.Pool, redis: aioredis.Redis
+) -> None:
+    provider = FakeHistory(error=lambda n: ProviderError("HTTP 502") if n == 1 else None)
+    window = Window(at(MONDAY, 10, 0), at(MONDAY, 10, 59))
+
+    def run(now: datetime) -> Awaitable[RunReport]:
+        return recovery(pg, redis, provider, now, ["EURUSD"]).run_once(
+            "periodic", apply=True, window=window
+        )
+
+    first = await run(at(MONDAY, 12, 0))
+    soon = await run(at(MONDAY, 12, 15))
+    later = await run(at(MONDAY, 13, 1))
+
+    assert (first.status, first.bars_inserted) == ("partial", 0)
+    assert soon.status == "idle"
+    assert (later.status, later.bars_inserted, len(provider.calls)) == ("succeeded", 60, 2)
+
+
+# ------------------------------------------------------- the request allowance --
+# Recovery may use 3 an hour here; the account allows 10.
+SMALL = QuotaLimits(per_hour=10, per_day=100, reserve_per_hour=7, reserve_per_day=10)
+
+
+async def test_recovery_waits_for_allowance_the_feed_does_not_need(
+    pg: asyncpg.Pool, redis: aioredis.Redis
+) -> None:
+    now = at(MONDAY, 12, 0)
+    clock = [now]
+
+    def wall() -> float:
+        return clock[0].timestamp()
+
+    quota = RequestQuota(redis, "tiingo", SMALL, clock=wall)
+    provider = FakeHistory()
+    window = Window(at(MONDAY, 10, 0), at(MONDAY, 10, 59))
+    await seed_live(pg, "EURUSD", span(at(MONDAY, 10, 0), at(MONDAY, 10, 29)))
+
+    first = await recovery(pg, redis, provider, now, quota=quota).run_once(
+        "periodic", apply=True, window=window
+    )
+    assert (first.status, len(provider.calls), first.requests_planned) == ("partial", 3, 5)
+    assert await quota.used() == (3, 3)
+
+    clock[0] = now + timedelta(minutes=15)
+    held = await recovery(pg, redis, provider, clock[0], quota=quota).run_once(
+        "periodic", apply=True, window=window
+    )
+    assert held.status == "partial" and len(provider.calls) == 3
+
+    clock[0] = now + timedelta(hours=1, minutes=1)
+    done = await recovery(pg, redis, provider, clock[0], quota=quota).run_once(
+        "periodic", apply=True, window=window
+    )
+    assert done.status == "succeeded" and len(provider.calls) == 5
+    live = await rows(pg, "EURUSD", MONDAY)
+    assert all(live[m]["source"] == "stream" for m in span(at(MONDAY, 10, 0), at(MONDAY, 10, 29)))
+    assert {s: len(await rows(pg, s, MONDAY)) for s in SYMBOLS} == dict.fromkeys(SYMBOLS, 60)
+
+
+async def test_the_feeds_history_load_during_a_run_comes_first(
+    pg: asyncpg.Pool, redis: aioredis.Redis
+) -> None:
+    now = at(MONDAY, 12, 0)
+    quota = RequestQuota(redis, "tiingo", SMALL, clock=now.timestamp)
+
+    async def leader_change(_s: str, _a: datetime, _b: datetime) -> None:
+        if len(provider.calls) == 1:  # a new leader loads its history mid-run
+            for _ in range(5):
+                await quota.record("history_1d")
+
+    provider = FakeHistory(before=leader_change)
+    report = await recovery(pg, redis, provider, now, quota=quota).run_once(
+        "periodic", apply=True, window=Window(at(MONDAY, 10, 0), at(MONDAY, 10, 59))
+    )
+
+    assert (report.status, len(provider.calls)) == ("partial", 1)
+    assert await quota.used() == (6, 6)
 
 
 # ------------------------------------------------------------- live bars win --

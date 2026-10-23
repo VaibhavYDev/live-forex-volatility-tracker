@@ -36,6 +36,7 @@ from fx_ingestor.providers import (
     ProviderError,
     build_provider,
 )
+from fx_ingestor.quota import RequestQuota
 from fx_ingestor.recovery import HistoryRecovery, RecoveryConfig, RecoveryStore
 from fx_ingestor.supervisor import BackoffPolicy, CircuitBreaker, StalenessWatchdog
 
@@ -63,12 +64,14 @@ class Ingestor:
     def __init__(self, cfg: IngestorSettings) -> None:
         self.cfg = cfg
         self.redis = make_redis(cfg.redis_url)
+        self.quota = RequestQuota(self.redis, cfg.provider, cfg.quota_limits)
         self.pipeline = IngestPipeline(
             self.redis,
             cfg.symbol_list,
             bucket_seconds=cfg.bucket_seconds,
             ewma_lambda=cfg.ewma_lambda,
             retention_s=cfg.stream_retention_s,
+            quota=self.quota,
         )
         self.lease = LeaderLease(
             self.redis, keys.LEADER_LEASE, cfg.lease_ttl_ms, cfg.lease_renew_ms
@@ -296,6 +299,7 @@ class Ingestor:
                                 days_per_request=self.cfg.recovery_days_per_request,
                             ),
                             stop=self.lease.lost,
+                            quota=self.quota,
                         )
                     await recovery.run_once(trigger, apply=self.cfg.recovery_mode == "apply")
                     trigger = "periodic"

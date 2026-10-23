@@ -68,6 +68,7 @@ from fx_core.volatility.buckets import GAP_BAR_MULTIPLE, floor_to_bucket
 from prometheus_client import Counter, Gauge, Histogram
 
 from fx_ingestor.providers import MarketDataProvider, ProviderError
+from fx_ingestor.quota import RequestQuota
 
 log = structlog.get_logger(__name__)
 
@@ -163,8 +164,10 @@ class IngestPipeline:
         retention_s: int = 900,
         detector_config: DetectorConfig | None = None,
         trigger_config: TriggerConfig | None = None,
+        quota: RequestQuota | None = None,
     ) -> None:
         self._redis = redis
+        self._quota = quota
         self._bucket_seconds = bucket_seconds
         self._retention_ms = retention_s * 1000
         self._detector_config = detector_config or DetectorConfig()
@@ -574,6 +577,8 @@ class IngestPipeline:
         self, provider: MarketDataProvider, symbol: str, interval: str, span: timedelta
     ) -> int:
         end = datetime.now(UTC)
+        if self._quota is not None:
+            await self._quota.record(f"history_{interval}")
         try:
             bars = await provider.backfill(symbol, end - span, end, interval)
         except ProviderError as exc:

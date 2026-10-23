@@ -37,6 +37,7 @@ __all__ = [
     "channel_tick",
     "channel_vol",
     "history",
+    "provider_requests",
     "quote",
     "regime_state",
     "vol_state",
@@ -166,6 +167,16 @@ def regime_state(symbol: str) -> str:
     the escalation, which would have been the kinder bug.
     """
     return f"regime:{symbol}"
+
+
+def provider_requests(provider: str) -> str:
+    """Every REST request made with the provider's token in the last day, scored by time.
+
+    Durable, like ``regime_state``, and bounded by its writer to one day. An evicted
+    ledger would read as "nothing used" and let history recovery spend the requests
+    the live feed needs. See fx_ingestor.quota.
+    """
+    return f"quota:{provider}:rest"
 
 
 # --- pub/sub channels (not keys; nothing to evict) ---------------------------

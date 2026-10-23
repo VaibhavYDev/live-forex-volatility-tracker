@@ -76,6 +76,7 @@ from fx_ingestor.providers import (
     ProviderRateLimitError,
     build_provider,
 )
+from fx_ingestor.quota import RequestQuota
 
 log = structlog.get_logger(__name__)
 
@@ -83,7 +84,8 @@ MINUTE: Final = timedelta(minutes=1)
 # The live writer keeps the newest 1,440 one-minute bars (pipeline._write).
 HOT_CACHE_BARS: Final = 1_440
 # A span fetched this long after its last minute is settled: what the provider
-# did not have by then, later runs do not ask for again.
+# did not have by then, later runs do not ask for again. Until then it is asked
+# for at most once in each such interval, not on every run.
 SETTLE: Final = timedelta(hours=1)
 # How long to leave the provider alone after it refused us or asked us to slow down.
 AUTH_BACKOFF: Final = timedelta(hours=6)
@@ -476,6 +478,21 @@ class RecoveryStore:
             )
         return [(r["span_start"], r["span_end"]) for r in rows]
 
+    async def asked_since(
+        self, symbol: str, window: Window, since: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        """Spans already asked for after ``since``, whatever the answer was."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT span_start, span_end FROM history_recovery_spans"
+                " WHERE symbol = $1 AND span_end >= $2 AND span_start <= $3 AND fetched_at > $4",
+                symbol,
+                window.start,
+                window.end,
+                since,
+            )
+        return [(r["span_start"], r["span_end"]) for r in rows]
+
     async def abort_stale_runs(self, conn: asyncpg.Connection) -> int:
         # Called only while holding the advisory lock: any run still 'running' is dead.
         result = await conn.execute(
@@ -663,8 +680,10 @@ class HistoryRecovery:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         stop: asyncio.Event | None = None,
         is_open: Callable[[datetime], bool] = is_market_open,
+        quota: RequestQuota | None = None,
     ) -> None:
         self._store = store
+        self._quota = quota
         self._provider = provider
         self._provider_name = provider_name
         self._symbols = list(symbols)
@@ -709,10 +728,10 @@ class HistoryRecovery:
         now: datetime,
     ) -> RunReport:
         aborted = await self._store.abort_stale_runs(lock) if apply else 0
-        spans = await self._missing(window, ready)
+        spans, askable = await self._missing(window, ready, now)
         requests = [
             r
-            for r in plan_requests(spans, self._cfg.days_per_request)
+            for r in plan_requests(askable, self._cfg.days_per_request)
             if now >= self.symbol_blocked_until.get(r.symbol, now)
         ]
         stale = await self._store.stale_rollups(window, now)
@@ -733,6 +752,9 @@ class HistoryRecovery:
         if not spans and not stale and not repairs:
             report.reason = "nothing missing"
             return report
+        if not askable and not stale and not repairs:
+            report.reason = "every missing minute was asked for within the hour"
+            return report
 
         report.run_id = uuid.uuid4()
         report.status = "running"
@@ -752,18 +774,23 @@ class HistoryRecovery:
         await self._store.finish_run(report, error)
         return report
 
-    async def _missing(self, window: Window, ready: bool) -> list[Span]:
+    async def _missing(
+        self, window: Window, ready: bool, now: datetime
+    ) -> tuple[list[Span], list[Span]]:
+        """Missing minutes as spans, and the part of them not asked for within SETTLE."""
         expected = open_minutes(window, self._is_open)
         spans: list[Span] = []
+        askable: list[Span] = []
         for symbol in self._symbols:
             present = await self._store.present(symbol, window)
-            settled = (
-                await self._store.settled(symbol, window)
-                if ready and not self._cfg.include_settled
-                else []
-            )
+            settled: list[tuple[datetime, datetime]] = []
+            asked: list[tuple[datetime, datetime]] = []
+            if ready and not self._cfg.include_settled:
+                settled = await self._store.settled(symbol, window)
+                asked = await self._store.asked_since(symbol, window, now - SETTLE)
             spans += missing_spans(symbol, expected, present, settled)
-        return spans
+            askable += missing_spans(symbol, expected, present, settled + asked)
+        return spans, askable
 
     async def _request_all(
         self, requests: Sequence[Request], report: RunReport, now: datetime
@@ -780,6 +807,12 @@ class HistoryRecovery:
                 return changed, True, "leadership or shutdown ended the run"
             if request.symbol in refused:
                 continue
+            if self._quota is not None and not await self._quota.take("recovery"):
+                return (
+                    changed,
+                    True,
+                    "postponed: the provider allowance left is reserved for the feed",
+                )
             if i:
                 await self._sleep(self._cfg.request_spacing_s)
             outcome = await self._fetch(request, report, now)
@@ -907,6 +940,8 @@ async def _cli(args: argparse.Namespace) -> int:
         return 2
     pool = await asyncpg.create_pool(cfg.database_url, min_size=1, max_size=3, command_timeout=120)
     redis = aioredis.Redis.from_url(cfg.redis_url, decode_responses=True)
+    # The same ledger the running leader uses, so a manual run spends only what it may.
+    quota = RequestQuota(redis, cfg.provider, cfg.quota_limits)
     try:
         recovery = HistoryRecovery(
             store=RecoveryStore(pool, redis),
@@ -924,6 +959,7 @@ async def _cli(args: argparse.Namespace) -> int:
                 days_per_request=cfg.recovery_days_per_request,
                 include_settled=args.include_settled,
             ),
+            quota=quota,
         )
         report = await recovery.run_once("manual", apply=args.apply, window=Window(start, end))
     finally:
