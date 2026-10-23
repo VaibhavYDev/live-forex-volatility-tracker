@@ -99,6 +99,14 @@ type Point = { time: number; open: number; high: number; low: number; close: num
 const updates = (): Point[] => lwc.chart!.candles.update.mock.calls.map((c) => c[0] as Point);
 const drawn = (): Point[] => lwc.chart!.candles.setData.mock.calls.at(-1)![0] as Point[];
 const candle = (b: Bar) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c });
+/** The store behind the chart, for the tests that drive it directly. */
+const fx = () => ({ store });
+/** How often the chart was fitted or zoomed by code, rather than by a user. */
+const zoom = () => [
+  lwc.timeScale.fitContent.mock.calls.length,
+  lwc.timeScale.setVisibleLogicalRange.mock.calls.length,
+  lwc.timeScale.applyOptions.mock.calls.length,
+];
 
 describe("the live candle on every timeframe", () => {
   it.each(TIMEFRAMES.filter((tf) => tf !== "1d"))(
@@ -571,4 +579,76 @@ describe("provenance", () => {
       await screen.findByText("Today partial: 10 of 610 minutes observed"),
     ).toBeInTheDocument();
   });
+});
+
+describe("the daily rollover at 00:00 UTC", () => {
+  const D = BASE - 10 * 3_600; // 2026-10-21 00:00 UTC
+  const NEXT = D + 86_400;
+  const PAIRS: Record<string, number> = { EURUSD: 1, GBPUSD: 1.2, USDJPY: 140, AUDUSD: 0.65, USDCHF: 0.76 };
+  const scaled = (b: Bar, k: number): Bar => ({ ...b, o: b.o * k, h: b.h * k, l: b.l * k, c: b.c * k });
+
+  for (const [pair, k] of Object.entries(PAIRS)) {
+    it(`${pair}: closes the day as observed, opens the next with its first tick, keeps both`, async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+      vi.setSystemTime((NEXT - 30) * 1000); // 23:59:30
+      // 10:00-23:58 sealed; the provider's bar for the day as its 23:05 refresh left it.
+      const day = minutes(839).map((b) => scaled(b, k));
+      const seen = day.filter((b) => b.t < D + 23 * 3_600 + 5 * 60);
+      const provider: Bar = {
+        t: D,
+        o: day[0]!.o * 0.999,
+        h: Math.max(...seen.map((b) => b.h)) * 1.0004,
+        l: Math.min(...seen.map((b) => b.l)) * 0.9999,
+        c: seen.at(-1)!.c,
+        n: 0,
+        src: "backfill",
+      };
+      vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ bars: [provider] }) } as Response);
+      loaded(pair, day);
+      mount(pair);
+      pick("1d");
+      await act(async () => {
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
+      expect(fx().store.daily(pair)).toHaveLength(1);
+
+      const lastMinute = scaled(m(839), k);
+      live(pair, lastMinute);
+      const zoomCalls = zoom();
+
+      // 00:00:05 - the first tick of the new day.
+      vi.setSystemTime((NEXT + 5) * 1000);
+      const first = scaled(m(840, { n: 1 }), k);
+      live(pair, first);
+
+      const closedAs = {
+        time: D,
+        open: provider.o, // our minutes began at 10:00, so the provider saw the open
+        high: Math.max(provider.h, ...day.map((b) => b.h), lastMinute.h),
+        low: Math.min(provider.l, ...day.map((b) => b.l), lastMinute.l),
+        close: lastMinute.c, // we saw 23:59, the day's last minute
+      };
+      const settled = updates().filter((p) => p.time === D).at(-1)!;
+      expect(settled).toMatchObject(closedAs);
+      expect(settled.color).toBeUndefined();
+      expect(updates().at(-1)).toMatchObject({ time: NEXT, open: first.o, close: first.c });
+
+      // The minute clock ticks over into the new day and the series re-renders:
+      // whatever it redraws, the finished day stays as it closed.
+      const fullDraws = lwc.chart!.candles.setData.mock.calls.length;
+      const partDraws = updates().length;
+      await act(async () => void vi.advanceTimersByTime(20_000));
+      const redrawn = lwc.chart!.candles.setData.mock.calls
+        .slice(fullDraws)
+        .map((c) => (c[0] as Point[]).find((p) => p.time === D));
+      for (const p of redrawn) expect(p).toMatchObject(closedAs);
+      for (const p of updates().slice(partDraws).filter((u) => u.time === D)) expect(p).toMatchObject(closedAs);
+
+      // A reconnect a moment after midnight: the snapshot holds 23:59 sealed.
+      act(() => fx().store.mergeMinutes(pair, [...day.slice(-3), { ...lastMinute, n: 9 }]));
+      const times = (lwc.chart!.candles.setData.mock.calls.at(-1)![0] as Point[]).map((p) => p.time);
+      expect(times).toEqual([...new Set(times)].sort((a, b) => a - b));
+      expect(zoom()).toEqual(zoomCalls);
+    });
+  }
 });

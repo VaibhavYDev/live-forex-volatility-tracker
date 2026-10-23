@@ -340,3 +340,121 @@ describe("the daily candle", () => {
     expect(dayCandle(days, [], day - 2 * DAY_S)).toEqual(days[0]);
   });
 });
+
+describe("the daily rollover at 00:00 UTC", () => {
+  // Wednesday 21 October 2026: open all day, so the day's first open minute is
+  // 00:00 and its last is 23:59.
+  const D = utc("2026-10-21T00:00:00");
+  const NEXT = D + DAY_S;
+  const PAIRS: Record<string, number> = {
+    EURUSD: 1.1,
+    GBPUSD: 1.33,
+    USDJPY: 158,
+    AUDUSD: 0.7,
+    USDCHF: 0.82,
+  };
+  const path = (base: number, from: number, count: number): Bar[] =>
+    Array.from({ length: count }, (_, i) => {
+      const o = base * (1 + 0.001 * Math.sin(i / 37));
+      const c = base * (1 + 0.001 * Math.sin((i + 1) / 37));
+      return {
+        t: from + i * 60,
+        o,
+        h: Math.max(o, c) * 1.00002,
+        l: Math.min(o, c) * 0.99998,
+        c,
+        n: 3,
+        src: "stream",
+      };
+    });
+  // The provider's bar for a day as its last hourly refresh left it: the
+  // minutes up to that refresh, plus an extreme our feed did not see.
+  const providerAsOf = (minutes: Bar[], day: number, refreshed: number, spike: number): Bar => {
+    const seen = minutes.filter((m) => m.t >= day && m.t < refreshed);
+    return {
+      t: day,
+      o: seen[0]!.o,
+      h: Math.max(...seen.map((m) => m.h)) * spike,
+      l: Math.min(...seen.map((m) => m.l)),
+      c: seen.at(-1)!.c,
+      n: 0,
+      src: "backfill",
+    };
+  };
+
+  for (const [pair, base] of Object.entries(PAIRS)) {
+    it(`${pair}: yesterday's candle after midnight is the candle it closed as`, () => {
+      const today = path(base, D, 1_440);
+      const yesterday = { t: D - DAY_S, o: base, h: base * 1.01, l: base * 0.99, c: base, n: 0, src: "backfill" };
+      const stale = providerAsOf(today, D, D + 23 * 3_600 + 5 * 60, 1.0004);
+      const daily = [yesterday, stale];
+
+      // 23:59:30 - the day's last minute still forming, everything before it sealed.
+      const before = dailySeries(daily, today.slice(0, -1), D + 1_439 * 60 + 30).bars.at(-1)!;
+      const asItClosed = extend(before, today.at(-1)!, D);
+      // 00:00:30 - the first tick of the new day sealed 23:59.
+      const after = dailySeries(daily, today, NEXT + 30).bars.at(-1)!;
+
+      expect(after.t).toBe(D);
+      expect([after.o, after.h, after.l, after.c]).toEqual([
+        asItClosed.o,
+        asItClosed.h,
+        asItClosed.l,
+        asItClosed.c,
+      ]);
+      // Not the provider's bar as its last refresh left it, an hour short.
+      expect(after.c).toBe(today.at(-1)!.c);
+      expect(after.c).not.toBe(stale.c);
+      expect(after.h).toBe(stale.h); // the extreme only the provider saw is kept
+    });
+
+    it(`${pair}: the new day opens with its first genuine observation and keeps it`, () => {
+      const today = path(base, D, 1_440);
+      const tomorrow = path(base * 1.002, NEXT, 5);
+      const minutes = [...today, ...tomorrow];
+      const daily = [providerAsOf(today, D, NEXT, 1)];
+
+      const early = dailySeries(daily, minutes, NEXT + 5 * 60 + 10).bars.at(-1)!;
+      expect(early).toMatchObject({ t: NEXT, o: tomorrow[0]!.o });
+
+      // The provider's own bar for the new day arrives with its hourly refresh,
+      // stamped from a tick a moment before ours.
+      const theirs = { ...providerAsOf(tomorrow, NEXT, NEXT + 300, 1), o: tomorrow[0]!.o * 1.00005 };
+      const later = dailySeries([...daily, theirs], minutes, NEXT + 5 * 60 + 10).bars.at(-1)!;
+      expect(later.o).toBe(tomorrow[0]!.o);
+    });
+  }
+
+  it("puts no price at midnight that was not observed", () => {
+    const today = path(1.1, D, 1_440);
+    const { bars } = dailySeries([providerAsOf(today, D, NEXT, 1)], today, NEXT + 20);
+    expect(bars.at(-1)!.t).toBe(D);
+  });
+
+  it("keeps yesterday from our minutes when the provider has no bar for it yet", () => {
+    const today = path(1.1, D, 1_440);
+    const older = { t: D - DAY_S, o: 1.1, h: 1.11, l: 1.09, c: 1.1, n: 0, src: "backfill" };
+    const { bars } = dailySeries([older], today, NEXT + 30);
+    expect(bars.map((b) => b.t)).toEqual([D - DAY_S, D]);
+    expect(bars[1]).toEqual(dayCandle([], today, D));
+  });
+
+  it("takes from the provider what our minutes did not see of a finished day", () => {
+    const full = path(1.1, D, 1_440);
+    const provider = providerAsOf(full, D, NEXT, 1);
+    // Our feed ran from 10:00 to 14:00 only.
+    const ours = full.slice(600, 840);
+    const [candle] = dailySeries([provider], ours, NEXT + 3_600).bars;
+    expect(candle).toMatchObject({ o: provider.o, c: provider.c, h: provider.h, l: provider.l });
+  });
+
+  it("keeps the UTC day when New York changes its clocks", () => {
+    // Sunday 1 November 2026: the clocks go back and the week opens 22:00 UTC.
+    const sunday = utc("2026-11-01T00:00:00");
+    const minutes = path(1.1, utc("2026-11-01T22:00:00"), 120);
+    const provider = { ...providerAsOf(minutes, sunday, sunday + DAY_S, 1), o: minutes[0]!.o * 0.9999 };
+    const { bars, coverage } = dailySeries([provider], minutes, sunday + DAY_S - 1);
+    expect(bars.at(-1)).toMatchObject({ t: sunday, o: minutes[0]!.o });
+    expect(coverage).toEqual({ observed: 119, expected: 119 });
+  });
+});

@@ -64,7 +64,7 @@ from fx_core.alerts import DetectorConfig, Regime, RegimeDetector, RegimeTransit
 from fx_core.alerts.detector import DetectorSnapshot
 from fx_core.models import Bar, Estimator, Tick, VolSnapshot
 from fx_core.volatility import BucketAccumulator, EwmaVariance, RollingWindow
-from fx_core.volatility.buckets import floor_to_bucket
+from fx_core.volatility.buckets import GAP_BAR_MULTIPLE, floor_to_bucket
 from prometheus_client import Counter, Gauge, Histogram
 
 from fx_ingestor.providers import MarketDataProvider, ProviderError
@@ -89,11 +89,6 @@ REGIME_STATE = Gauge("fx_regime_stressed", "1 while the symbol is STRESSED", ["s
 DETECTOR_ARMED = Gauge("fx_detector_armed", "1 while the detector is evaluating", ["symbol"])
 BARS_GATED = Counter("fx_bars_gated_total", "Sealed bars not evaluated", ["symbol", "reason"])
 REGIME_RESTORED = Counter("fx_regime_restored_total", "Detector states rehydrated on failover")
-
-# A sealed bar this far after the previous one spans a session break or an
-# outage, so its return is a gap, not a minute of trading. Excluded from every
-# estimator - this is the same shape of artefact as the Sunday reopen.
-GAP_BAR_MULTIPLE = 3
 
 
 # How much of the provider's own past to load: a day of minutes, which is all the
@@ -232,6 +227,10 @@ class IngestPipeline:
             # a bar is never published before its window has actually elapsed.
             sealed = st.bucket.seal()
             st.window.push(sealed)
+            if bucket_start - st.bucket.bucket > timedelta(
+                seconds=self._bucket_seconds * GAP_BAR_MULTIPLE
+            ):
+                st.last_price = None
             st.bucket = BucketAccumulator.start(
                 tick.symbol, tick.ts_event, mid, self._bucket_seconds
             )
