@@ -173,9 +173,9 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
     if (v.lastT !== null && start < v.lastT) return;
 
     const minutes = store.minutes(sym);
-    const candleAt = (at: number, before?: number) =>
+    const candleAt = (at: number, before?: number, ended = false) =>
       timeframe === "1d"
-        ? dayCandle(store.daily(sym), minutes, at, before)
+        ? dayCandle(store.daily(sym), minutes, at, before, ended)
         : bucketOf(minutes, at, seconds, before);
 
     const draw = (b: Bar, forming: boolean) => {
@@ -185,7 +185,7 @@ export function PriceChart({ symbol, height = 380 }: { symbol: string; height?: 
     };
 
     if (v.lastT !== null && start > v.lastT && v.formingAt === v.lastT) {
-      const ended = candleAt(v.lastT) ?? v.painted.get(v.lastT);
+      const ended = candleAt(v.lastT, undefined, true) ?? v.painted.get(v.lastT);
       if (ended) draw(ended, false);
     }
 
