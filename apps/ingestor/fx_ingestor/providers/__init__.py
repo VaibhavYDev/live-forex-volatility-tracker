@@ -15,7 +15,9 @@ from typing import Any
 from fx_ingestor.providers.base import (
     MarketDataProvider,
     ProviderAuthError,
+    ProviderEntitlementError,
     ProviderError,
+    ProviderRateLimitError,
 )
 from fx_ingestor.providers.tiingo import TiingoProvider
 
@@ -23,7 +25,9 @@ __all__ = [
     "PROVIDERS",
     "MarketDataProvider",
     "ProviderAuthError",
+    "ProviderEntitlementError",
     "ProviderError",
+    "ProviderRateLimitError",
     "TiingoProvider",
     "build_provider",
 ]

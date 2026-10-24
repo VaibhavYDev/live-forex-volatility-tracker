@@ -13,6 +13,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "structlog>=24.4",
     "prometheus-client>=0.20",
+    # History recovery reads and writes bars_1m (fx_ingestor.recovery).
+    "asyncpg>=0.29",
 ]
 
 [project.scripts]

@@ -386,6 +386,41 @@ instead of rendering stale prices as though they were live.
 > `MIN_HEALTHY_SESSION_S` before it resets the ladder or closes the breaker;
 > `tests/unit/test_reconnect_ladder.py` fails against the old behaviour.
 
+### 5. Recovering the minutes the feed missed
+
+A minute with no tick has no row, and no amount of reconnecting brings it back:
+on 2026-10-12 Windows Modern Standby stopped the stack for three hours and sleep
+stopped it for five days, while the provider kept every one of those minutes.
+`fx_ingestor/recovery.py` asks for them, and is careful about what it does with
+the answer.
+
+* **Only real, closed minutes.** Open-market minutes (New York calendar, so DST is
+  handled) with no row in `bars_1m`, and only once the tick stream can no longer
+  deliver them live (its 15-minute retention plus two minutes).
+* **Only what the provider returns.** A minute it has no bar for stays missing and
+  is recorded as silent - nothing is interpolated.
+* **Insert if absent.** A stored bar, live or recovered earlier, is never changed;
+  running the same recovery twice writes nothing the second time.
+* **Labelled.** Rows carry `source = 'backfill'` and the id of the run that fetched
+  them (migration 004), with `tick_count = 0` and zero return sums: the provider
+  gives OHLC, not ticks, and no tick-level variance is implied.
+* **Never a market event.** Nothing reaches the tick stream, Pub/Sub, the regime
+  detector, z-scores or alerts.
+* **Crash-safe and single-runner.** A PostgreSQL advisory lock serialises runs; a
+  run that dies leaves valid rows, and the next one repairs the rest (stale
+  rollups, the Redis hot cache) without asking the provider again.
+* **Within the account's request allowance.** Every REST request made with the
+  token - the leader's history loads, its hourly refresh, recovery and the CLI - is
+  counted in one Redis ledger (`fx_ingestor/quota.py`). The feed's own requests are
+  never refused; recovery takes one only while the rolling hour and day leave the
+  reserve (30 of 50 an hour, 400 of 1,000 a day by default), otherwise it waits for
+  a later run. A span asked for within the last hour is not asked for again yet.
+
+It is off unless `FX_RECOVERY_MODE` says otherwise: `dry_run` reports what it
+would fetch and write, `apply` writes. A bounded window can also be recovered by
+hand: `python -m fx_ingestor.recovery --since 2026-10-11T21:00Z` (dry run) and
+then with `--apply`.
+
 ---
 
 ## Failure-mode matrix
@@ -400,6 +435,7 @@ Every row has a branch in the code and a test in `tests/chaos/` or
 | Upstream silent, socket open | staleness watchdog, 30 s | detector gated *before* teardown, forced reconnect | ticks that never arrived | automatic |
 | Upstream returns 401 | immediately | **no retry**, status `fatal`, exit 78 (`EX_CONFIG`) | n/a | operator |
 | Market legitimately closed | `fx_core.calendar` | watchdog stands down; banner is neutral, not an error | none | Sunday 17:00 NY |
+| Whole stack stopped (sleep, reboot, Docker not started) | recovery sweep finds open-market minutes with no bar | with `FX_RECOVERY_MODE=apply`, the leader refills them from the provider's minute history as `backfill` | only minutes the provider does not have, recorded as silent | next sweep (15 min) |
 | Leader ingestor killed | lease TTL, 10 s | standby promotes and **rehydrates the detector** from `regime:*` | ticks during the gap | ≤ 10 s |
 | Redis unavailable | ping / write failure | ingest fails loudly; `/readyz` → 503; browser shows Disconnected | ticks during the outage | automatic |
 | Worker killed mid-batch | pending idle > 60 s | a survivor `XAUTOCLAIM`s the backlog | **none** — WAL holds 15 min | ≤ 60 s |

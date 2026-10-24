@@ -28,6 +28,7 @@ cd apps/web && npm ci && cd ../..
 docker compose up -d redis timescale
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f infra/migrations/001_init.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f infra/migrations/003_alert_events.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f infra/migrations/004_history_recovery.sql
 ```
 
 Everything below is also wired into `make` targets if you prefer those.

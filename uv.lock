@@ -592,6 +592,7 @@ name = "fx-ingestor"
 version = "0.1.0"
 source = { editable = "apps/ingestor" }
 dependencies = [
+    { name = "asyncpg" },
     { name = "fx-core" },
     { name = "fx-platform" },
     { name = "httpx" },
@@ -605,6 +606,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "asyncpg", specifier = ">=0.29" },
     { name = "fx-core", editable = "packages/core" },
     { name = "fx-platform", editable = "packages/platform" },
     { name = "httpx", specifier = ">=0.27" },
