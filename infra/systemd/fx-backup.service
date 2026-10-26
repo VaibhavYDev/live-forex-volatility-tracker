@@ -1,0 +1,17 @@
+# Daily backup of the cloud stack (scripts/cloud/backup.sh). Install:
+#   sudo cp infra/systemd/fx-backup.* /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fx-backup.timer
+# Adjust User and WorkingDirectory if the checkout lives elsewhere. For an
+# off-server copy, configure rclone for this user and set FX_BACKUP_REMOTE below.
+[Unit]
+Description=Back up the Live Forex Volatility Tracker database and Redis
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/live-forex-volatility-tracker
+Environment=FX_BACKUP_DIR=/home/ubuntu/fx-backups
+#Environment=FX_BACKUP_REMOTE=oci:fx-backups
+ExecStart=/home/ubuntu/live-forex-volatility-tracker/scripts/cloud/backup.sh

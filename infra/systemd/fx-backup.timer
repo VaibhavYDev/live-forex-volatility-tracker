@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily backup of the Live Forex Volatility Tracker
+
+[Timer]
+# Off the hour, so it never coincides with a restart scheduled on the hour;
+# Persistent catches up if the server was off at the scheduled time.
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

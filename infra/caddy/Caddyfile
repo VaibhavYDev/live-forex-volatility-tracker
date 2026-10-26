@@ -1,4 +1,4 @@
-# TLS terminator for the public demo.
+# TLS terminator and access gate for the cloud deployment.
 #
 # Caddy is here for one reason: it obtains and renews a Let's Encrypt
 # certificate without a cron job, a renewal hook, or a 90-day reminder in
@@ -15,13 +15,35 @@
 
 	# Everything goes to the nginx image the local stack also runs: it serves the
 	# built SPA and already proxies /api and /ws to the API with the WebSocket
-	# upgrade dance. Terminating TLS here rather than teaching nginx about
-	# certificates keeps the demo running the SAME web artifact as `docker
-	# compose up` on a laptop.
+	# upgrade dance (and applies the per-visitor limits). Terminating TLS here
+	# rather than teaching nginx about certificates keeps the server running the
+	# SAME web artifact as `docker compose up` on a laptop.
 	#
 	# reverse_proxy passes Upgrade/Connection through natively and does not
-	# buffer, so streaming sockets need no extra directives.
-	reverse_proxy web:80
+	# buffer, so streaming sockets need no extra directives. It also replaces any
+	# X-Forwarded-For the client sent with the client's real address, which is
+	# what nginx's limits key on.
+
+	# The uptime monitor's endpoint answers without credentials. It reports
+	# whether the service is healthy - market state, feed heartbeat, worker lag -
+	# and never a price.
+	@monitor path /api/health
+	handle @monitor {
+		reverse_proxy web:80
+	}
+
+	# Everything else, the dashboard and its data included, needs the access
+	# credentials. Tiingo's individual plans license the data for internal use
+	# only ("you may not display or share the data with another person or
+	# organization"), so the dashboard is private until a redistribution licence
+	# is in place - docs/deploy-cloud.md. The browser sends the same credentials
+	# on the WebSocket upgrade, so the live stream is covered too.
+	handle {
+		basic_auth {
+			{$FX_ACCESS_USER} {$FX_ACCESS_HASH}
+		}
+		reverse_proxy web:80
+	}
 
 	header {
 		# The dashboard is same-origin and loads no third-party script. Saying so

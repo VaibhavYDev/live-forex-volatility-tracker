@@ -16,6 +16,8 @@ apps/web/.vite/
 
 .env
 .env.local
+.env.cloud
+.deploy/
 *.local
 
 data/

@@ -189,68 +189,131 @@ def prod() -> dict[str, Any]:
     return doc
 
 
-class TestPublicDemo:
-    """The prod file faces the internet unattended for months.
+CADDYFILE = Path(__file__).resolve().parents[2] / "infra" / "caddy" / "Caddyfile"
 
-    Every invariant here is one that fails silently rather than loudly: a demo
-    that is up but wrong looks identical to a demo that is fine, right up until
-    the reviewer it was built for opens it.
+
+def _env(svc: dict[str, Any]) -> dict[str, Any]:
+    env: dict[str, Any] = svc.get("environment") or {}
+    return env
+
+
+class TestCloudDeployment:
+    """The prod file runs the whole stack on a server nobody watches.
+
+    Every invariant here is one that fails silently rather than loudly: a server
+    that is up but wrong looks identical to one that is fine until someone relies
+    on it.
     """
 
     def test_only_the_tls_terminator_is_reachable(self, prod: dict[str, Any]) -> None:
-        # Publishing anything else re-opens the hole the whole design closes:
-        # the API on a raw port means a second firewall rule on two firewalls,
-        # and a plaintext path around the certificate.
+        # Publishing anything else re-opens the hole the whole design closes: the
+        # API on a raw port is a plaintext path around the certificate and the
+        # access gate; Redis or PostgreSQL on one is the data itself.
         exposed = {name: svc["ports"] for name, svc in prod["services"].items() if svc.get("ports")}
         assert set(exposed) == {"caddy"}, f"unexpected public ports: {exposed}"
 
     def test_the_terminator_serves_both_http_and_https(self, prod: dict[str, Any]) -> None:
-        # 80 is not optional: it is how the ACME HTTP-01 challenge completes and
-        # how a visitor typing the bare hostname gets redirected to TLS.
-        published = {p.split(":")[0] for p in prod["services"]["caddy"]["ports"]}
-        assert published == {"80", "443"}
+        # 80 is not optional: it is how the ACME HTTP-01 challenge completes and how
+        # a visitor typing the bare hostname gets redirected to TLS.
+        ports = prod["services"]["caddy"]["ports"]
+        assert {p.rsplit(":", 1)[1] for p in ports} == {"80", "443"}
+        assert {re.search(r":-(\d+)}", p).group(1) for p in ports} == {"80", "443"}  # type: ignore[union-attr]
 
     def test_the_scaled_ingestor_still_claims_no_host_port(self, prod: dict[str, Any]) -> None:
-        # The original outage, restated for the profile that nobody watches.
         ing = prod["services"]["ingestor"]
         assert ing["deploy"]["replicas"] >= 2
         assert not ing.get("ports")
 
     def test_every_service_restarts_itself(self, prod: dict[str, Any]) -> None:
-        # The box reboots for kernel patches. Nothing on it is started by hand.
+        # The server reboots for kernel patches. Nothing on it is started by hand.
         for name, svc in prod["services"].items():
             assert svc.get("restart") == "unless-stopped", f"{name} would stay down"
 
     def test_every_service_caps_its_logs(self, prod: dict[str, Any]) -> None:
-        # 25 ticks/sec for months on a fixed boot volume. Unbounded json-file
-        # logs fill the disk, and a full disk takes down every container at once
-        # for a reason that looks nothing like logging.
         for name, svc in prod["services"].items():
             opts = (svc.get("logging") or {}).get("options", {})
             assert opts.get("max-size"), f"{name} has uncapped logs"
             assert opts.get("max-file"), f"{name} never rotates logs"
 
-    def test_certificates_survive_a_restart(self, prod: dict[str, Any]) -> None:
-        # Without a persistent /data, Caddy re-issues on every restart and burns
-        # through the Let's Encrypt rate limit, after which the demo serves an
-        # untrusted certificate for a week.
-        mounts = prod["services"]["caddy"]["volumes"]
-        assert any(str(m).endswith(":/data") for m in mounts), "no persistent cert store"
+    def test_every_service_has_a_memory_ceiling(self, prod: dict[str, Any]) -> None:
+        # One runaway process must not take the database down with it on a small VM.
+        for name, svc in prod["services"].items():
+            limit = (((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}).get(
+                "memory"
+            )
+            assert limit, f"{name} can use all of the server's memory"
 
-    def test_the_database_is_absent_on_purpose(self, prod: dict[str, Any]) -> None:
-        # Guards the claim the file makes: the dashboard reads Redis only. If
-        # someone later couples the API to Postgres, this profile breaks in
-        # production and this test is the cheapest place to find out.
-        assert "timescale" not in prod["services"]
-        assert "worker" not in prod["services"]
+    def test_certificates_and_data_survive_a_restart(self, prod: dict[str, Any]) -> None:
+        # Without a persistent /data Caddy re-issues on every restart and burns the
+        # Let's Encrypt rate limit; without named volumes a redeploy loses history.
+        def mounts(name: str) -> list[str]:
+            return [str(m) for m in prod["services"][name]["volumes"]]
+
+        assert any(m.startswith("caddy-data:") and m.endswith(":/data") for m in mounts("caddy"))
+        assert any(m.startswith("timescale-data:") for m in mounts("timescale"))
+        assert any(m.startswith("redis-data:") for m in mounts("redis"))
+        assert {"caddy-data", "timescale-data", "redis-data"} <= set(prod["volumes"])
+
+    def test_the_full_stack_runs(self, prod: dict[str, Any]) -> None:
+        # Durable history, the alert log and gap recovery need the database and the
+        # worker; the cache-only subset this file used to be served the dashboard
+        # but kept nothing older than a day.
+        assert {"caddy", "web", "api", "ingestor", "worker", "redis", "timescale"} <= set(
+            prod["services"]
+        )
+        initdb = [
+            m
+            for m in prod["services"]["timescale"]["volumes"]
+            if "docker-entrypoint-initdb.d" in str(m)
+        ]
+        for migration in ("001_init.sql", "003_alert_events.sql", "004_history_recovery.sql"):
+            assert any(migration in str(m) for m in initdb), (
+                f"{migration} is not applied on first boot"
+            )
+
+    def test_the_datastores_require_passwords(self, prod: dict[str, Any]) -> None:
+        redis = prod["services"]["redis"]
+        assert "--requirepass" in redis["command"]
+        assert "${REDIS_PASSWORD}" in redis["command"]
+        assert _env(prod["services"]["timescale"])["POSTGRES_PASSWORD"] == "${POSTGRES_PASSWORD}"
+        for name in ("api", "ingestor", "worker"):
+            env = _env(prod["services"][name])
+            assert "${REDIS_PASSWORD:?" in env["REDIS_URL"], (
+                f"{name} reaches Redis without a password"
+            )
+            assert "${POSTGRES_PASSWORD:?" in env["DATABASE_URL"]
+
+    def test_only_the_ingestor_holds_the_provider_token(self, prod: dict[str, Any]) -> None:
+        holders = {
+            name for name, svc in prod["services"].items() if "FX_PROVIDER_TOKEN" in _env(svc)
+        }
+        assert holders == {"ingestor"}
+        assert _env(prod["services"]["ingestor"])["FX_PROVIDER_TOKEN"].startswith(
+            "${FX_PROVIDER_TOKEN:?"
+        )
+
+    def test_unattended_recovery_stays_off(self, prod: dict[str, Any]) -> None:
+        # Recovery spends the shared provider allowance and writes history; it is not
+        # approved to run unattended.
+        assert _env(prod["services"]["ingestor"])["FX_RECOVERY_MODE"] == "off"
+
+    def test_the_dashboard_is_behind_the_access_gate(self) -> None:
+        # The provider's individual plans license the data for internal use only.
+        # Everything but the health monitor needs credentials; the monitor reports
+        # health, never a price.
+        text = CADDYFILE.read_text()
+        assert re.search(r"@monitor\s+path\s+/api/health\n", text), (
+            "the monitor path is not exactly /api/health"
+        )
+        gated = text[text.index("\thandle {") :]
+        assert "basic_auth" in gated and "{$FX_ACCESS_USER} {$FX_ACCESS_HASH}" in gated
+        assert text.count("reverse_proxy web:80") == 2, "a route bypasses the gate"
 
     def test_the_api_really_does_not_open_a_database(self) -> None:
-        """The assumption the whole profile rests on, checked at the source.
+        """The dashboard is served from Redis alone; the database is the durable store.
 
-        Dropping Timescale is only safe while the API serves the dashboard from
-        Redis alone. The moment someone adds a query, the demo starts returning
-        500s on a box nobody is watching — so assert the absence of a driver
-        rather than trusting a comment.
+        Keeping the API free of a database driver keeps page loads off PostgreSQL and
+        keeps the dashboard up while the database restarts.
         """
         api = Path(__file__).resolve().parents[2] / "apps" / "api" / "fx_api"
         drivers = ("asyncpg", "psycopg", "sqlalchemy", "databases")

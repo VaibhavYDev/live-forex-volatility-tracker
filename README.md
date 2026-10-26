@@ -27,6 +27,29 @@ measured, it says so.
 
 ---
 
+## Live dashboard
+
+**Not public yet.** The dashboard streams genuine Tiingo quotes, and Tiingo's
+individual plans license that data for internal use only (*"you may not display or
+share the data with another person or organization"*). The hosted deployment is
+therefore password-protected, and a public link will appear here only once a
+licence permits displaying the data to others and the public deployment has been
+checked from a browser with no local setup. Nothing shown by this project is
+simulated: there is no demo mode.
+
+What the dashboard shows, for EURUSD, GBPUSD, USDJPY, AUDUSD and USDCHF:
+
+- live candles on 1m, 3m, 5m, 10m, 15m, 30m and 1D, with bars recovered from the
+  provider's history labelled as such;
+- tick volatility (EWMA) and five estimators side by side (close-to-close and
+  four range-based), each labelled with its annualisation basis;
+- the regime detector's z-score and its normal / stressed history;
+- the market state, always visible: **Live** for a fresh feed, **Market closed**
+  at the weekend, **Stale** with the age of the last update when quotes stop, and
+  **Reconnecting** while the feed recovers.
+
+---
+
 ## Run it
 
 ```bash
@@ -153,11 +176,15 @@ docker compose --profile observability up -d
 
 ### Hosting it yourself
 
-`docker-compose.prod.yml` is the public profile: Caddy terminating TLS in front
-of the same web image, no database, nothing published but 80 and 443. It runs on
-a free-tier ARM box — [docs/deploy-oracle.md](docs/deploy-oracle.md) is the
-runbook, including the two firewalls Oracle makes you open and the one you
-probably don't.
+`docker-compose.prod.yml` runs the complete stack on one server: Caddy for TLS and
+a password gate, the same web image with per-visitor limits, both ingestors, the
+worker and TimescaleDB, with nothing published but 80 and 443 and both datastores
+password-protected. Deploys are per commit with automatic rollback, backups are
+daily and verified, and `/api/health` gives an uptime monitor a market-aware
+answer. [docs/deploy-cloud.md](docs/deploy-cloud.md) is the runbook: choosing a
+server (Oracle Cloud Always Free is the default; its limits changed in 2026),
+the firewalls, monitoring, backups and restore, and what has to change before the
+dashboard may be public.
 
 Local development, the four test tiers and the contribution conventions are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -627,6 +654,7 @@ state machine are unit-testable without Redis, Postgres or a network.
 | `POST` | `/ws/ticket` | Single-use 30 s WebSocket ticket |
 | `WS` | `/ws/stream` | `subscribe` / `unsubscribe` / `ping`; snapshot then deltas |
 | `GET` | `/healthz` `/readyz` | Liveness checks nothing external; readiness checks Redis and feed age |
+| `GET` | `/api/health` | For uptime monitors: 503 on a missing ingestor heartbeat, a dead or lagging worker, or a feed down while the market is open; a closed market and the rollover hour are healthy. Never includes a price |
 
 The browser `WebSocket` constructor cannot set request headers — that is the
 spec, not an oversight — so authentication happens over ordinary HTTP and returns

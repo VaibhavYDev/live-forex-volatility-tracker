@@ -1,80 +1,95 @@
 # =============================================================================
-# The hosted deployment. Real market data only: it refuses to start without
-# FX_PROVIDER_TOKEN. Used ALONE, not layered over docker-compose.yml:
+# The cloud deployment: the complete stack on one server, behind Caddy.
+# Used ALONE, not layered over docker-compose.yml, with its own settings file:
 #
-#     docker compose -f docker-compose.prod.yml up -d --build
+#     cp -n .env.cloud.example .env.cloud     # then fill it in; see docs/deploy-cloud.md
+#     docker compose -f docker-compose.prod.yml --env-file .env.cloud up -d --build
 #
-# Standalone on purpose. Compose merges `depends_on` key-by-key, so an overlay
-# cannot REMOVE the base file's dependency on Timescale — it would inherit a
-# health gate on a service this profile deliberately does not run.
+# Real market data only: it refuses to start without a provider token, and access
+# is password-protected (Caddy basic auth) because the provider's individual plans
+# license the data for internal use only - see docs/deploy-cloud.md before
+# removing that gate.
 #
-# WHAT IS MISSING, AND WHY
-# ------------------------
-# No `timescale`, no `worker`. The API opens no database connection — every
-# figure the dashboard renders is served from Redis, which the ingestor writes.
-# Postgres is the DURABILITY path (the worker drains the WAL into hypertables),
-# not the dashboard path, so a demo box gains nothing from it and pays for it
-# twice: ~1GB of resident memory, and an image whose arm64 availability is not
-# guaranteed on Oracle's Ampere hardware.
+# WHY THE FULL STACK, NOT A CACHE-ONLY SUBSET
+# -------------------------------------------
+# The dashboard itself is served from Redis: the last 1,440 minutes and the
+# provider's daily bars. That is all the API reads. What Redis cannot give:
+#   - minutes older than a day (bars_1m and its 5m/1h rollups live in TimescaleDB);
+#   - a durable record of regime transitions (alert_events, written by the worker);
+#   - the history-recovery path, which fills gaps from provider history into the
+#     database (it stays off here: FX_RECOVERY_MODE=off, run by hand when needed);
+#   - backups of the observed history.
+# The whole stack measured ~350 MB of RAM on 2026-10-26, so the subset saved
+# nothing worth losing those for.
 #
-# The full five-service stack is what `docker compose up` runs locally. This
-# file is the subset that has to survive unattended for months, and every
-# service omitted is a service that cannot die at 3am while a reviewer looks.
+# Only Caddy publishes ports. Redis and PostgreSQL are reachable from the compose
+# network alone and both require a password.
 # =============================================================================
 
-name: fx-demo
+name: fx-volatility-cloud
+
+x-logging: &logs
+  # A fixed boot volume and a 25 tick/sec feed for months: uncapped json-file
+  # logs fill the disk and take every container down with them.
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
 
 x-python: &python
   build:
     context: .
     dockerfile: infra/docker/Dockerfile.python
+  # Tagged per commit by scripts/cloud/deploy.sh, so the previous release's images
+  # stay on the server and a rollback is a restart, not a rebuild.
+  image: fx-volatility-python:${FX_IMAGE_TAG:-local}
   environment: &pyenv
-    REDIS_URL: redis://redis:6379/0
-    FX_PROVIDER: tiingo
-    FX_PROVIDER_TOKEN: ${FX_PROVIDER_TOKEN:?set FX_PROVIDER_TOKEN in .env - this deployment serves real market data only}
+    REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.cloud}@redis:6379/0
+    DATABASE_URL: postgresql://fx:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.cloud}@timescale:5432/fx
     FX_SYMBOLS: "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF"
     LOG_LEVEL: INFO
   depends_on:
     redis: {condition: service_healthy}
+    timescale: {condition: service_healthy}
   restart: unless-stopped
-  # An unattended box has a finite disk. The default json-file driver grows
-  # without bound, and a 25 tick/sec feed running for months is exactly the
-  # workload that fills a boot volume and takes the demo down by filling `/`.
-  logging: &logs
-    driver: json-file
-    options: {max-size: "10m", max-file: "3"}
+  logging: *logs
 
 services:
+  # ------------------------------------------------------------------ edge --
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.7-alpine
     restart: unless-stopped
-    # The ONLY ports open to the internet. Everything else talks over the
-    # compose network, so the API is not directly reachable and needs no hole
-    # in either firewall.
+    # The ONLY ports open to the internet. 80 completes the ACME challenge and
+    # redirects to 443.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${FX_HTTP_PORT:-80}:80"
+      - "${FX_HTTPS_PORT:-443}:443"
     environment:
-      FX_DOMAIN: ${FX_DOMAIN:?set FX_DOMAIN in .env - Caddy needs a hostname to get a certificate for}
+      FX_DOMAIN: ${FX_DOMAIN:?set FX_DOMAIN in .env.cloud - Caddy needs a hostname to get a certificate for}
+      FX_ACCESS_USER: ${FX_ACCESS_USER:?set FX_ACCESS_USER in .env.cloud}
+      FX_ACCESS_HASH: ${FX_ACCESS_HASH:?set FX_ACCESS_HASH in .env.cloud (caddy hash-password)}
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      # Certificates live here. Losing this volume means re-issuing on every
-      # restart, which burns Let's Encrypt rate limits fast.
+      # Certificates live here. Losing it re-issues on every restart and burns
+      # through Let's Encrypt's rate limit.
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [web]
+    deploy:
+      resources: {limits: {memory: 256m}}
     logging: *logs
 
   web:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.web
+    image: fx-volatility-web:${FX_IMAGE_TAG:-local}
     restart: unless-stopped
-    # No host port. Caddy reaches it over the compose network; publishing it
-    # would expose plain HTTP alongside the TLS endpoint.
+    # No host port: Caddy reaches it over the compose network.
     depends_on: [api]
+    deploy:
+      resources: {limits: {memory: 128m}}
     logging: *logs
 
+  # -------------------------------------------------------------- services --
   api:
     <<: *python
     command:
@@ -82,47 +97,92 @@ services:
        "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
     environment:
       <<: *pyenv
-      # There is no login, so a browser cannot fetch a ticket. Auth defaults to
-      # ON in code; this is the explicit, documented opt-out, and it means anyone
-      # who reaches the hostname sees the feed. Confirm the data provider's terms
-      # allow public display before exposing it.
+      # The dashboard has no login of its own, so it cannot fetch a ticket; access
+      # is controlled at the edge by Caddy's basic auth instead.
       FX_REQUIRE_WS_TICKET: "0"
+      FX_CORS_ORIGINS: https://${FX_DOMAIN}
       FX_HEALTH_PORT: "8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
       interval: 30s
       timeout: 3s
       retries: 5
+    deploy:
+      resources: {limits: {memory: 512m}}
 
   ingestor:
     <<: *python
     command: ["python", "-m", "fx_ingestor.main"]
     environment:
       <<: *pyenv
+      # Only the ingestor holds the provider token; the API and worker never see it.
+      FX_PROVIDER: tiingo
+      FX_PROVIDER_TOKEN: ${FX_PROVIDER_TOKEN:?set FX_PROVIDER_TOKEN in .env.cloud - this deployment serves real market data only}
+      # Gap recovery spends the shared request allowance and writes history; it is
+      # run by hand (python -m fx_ingestor.recovery) until it has been approved for
+      # unattended use.
+      FX_RECOVERY_MODE: "off"
       FX_HEALTH_PORT: "9100"
-    # Two replicas here for the same reason as local: exactly one holds the
-    # Redis lease and connects upstream. On a public demo it earns its keep —
-    # `docker compose restart` on the leader shows the standby promote within
-    # the lease TTL, live, on a URL a reviewer is already looking at.
+    # Two replicas: exactly one holds the Redis lease and connects upstream, the
+    # other promotes within the lease TTL if it dies.
     deploy:
       replicas: 2
+      resources: {limits: {memory: 384m}}
 
+  worker:
+    <<: *python
+    command: ["python", "-m", "fx_worker.main"]
+    environment:
+      <<: *pyenv
+      FX_HEALTH_PORT: "9101"
+    deploy:
+      resources: {limits: {memory: 384m}}
+
+  # --------------------------------------------------------------- storage --
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
       - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
-    # Not published. Nothing outside this network has any business reaching it.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources: {limits: {memory: 768m}}
+    logging: *logs
+
+  timescale:
+    # Pinned for the same reason as in docker-compose.yml; published for amd64 and arm64.
+    image: timescale/timescaledb:2.30.0-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: fx
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      # Run once, in lexical order, when the volume is empty. Migration 002 is the
+      # Supabase variant and does not apply here.
+      - ./infra/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./infra/migrations/003_alert_events.sql:/docker-entrypoint-initdb.d/003_alert_events.sql:ro
+      - ./infra/migrations/004_history_recovery.sql:/docker-entrypoint-initdb.d/004_history_recovery.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fx -d fx"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    deploy:
+      resources: {limits: {memory: 1g}}
     logging: *logs
 
 volumes:
   redis-data:
+  timescale-data:
   caddy-data:
   caddy-config:

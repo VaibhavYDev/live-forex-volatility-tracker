@@ -28,6 +28,10 @@ defaults intact.
 | CORS | `http://localhost:5173` | Must be set explicitly for any other origin |
 | Redis / PostgreSQL | no external ports in production compose | The local compose file publishes them for inspection; do not copy it to a server |
 | Market-data token | server-side only | Read from `.env` by the ingestor; sent to Tiingo in a header, never in a URL, a log line or the browser bundle |
+| Cloud deployment access | password (Caddy basic auth over TLS) | Everything but `/api/health` requires it, because the provider's individual plans license the data for internal use only. See docs/deploy-cloud.md |
+| Per-visitor limits (cloud and local web image) | 20 API requests/s per address, burst 60; 8 sockets per address | nginx `limit_req` / `limit_conn`, keyed on the address Caddy forwards |
+| WebSocket clients per API replica | 200 | One more is refused with close code 1013 (try again later) |
+| Redis / PostgreSQL in the cloud deployment | password required, not published | The provider token is given to the ingestors only, never to the API or worker |
 
 ### Known limitations — deliberate, and listed rather than hidden
 
@@ -42,6 +46,9 @@ defaults intact.
   `docker compose up` work on a laptop. Change them before running anywhere else.
 * **Metrics endpoints are unauthenticated** on ports 9100/9101/8000. They expose
   operational data only, but they should not be internet-facing.
+* **The cloud password gate is one shared credential.** HTTP basic auth over TLS
+  keeps the dashboard private; it is not per-user access control. Rotate it by
+  setting a new hash in `.env.cloud` and redeploying.
 
 If you find something that is *not* on this list, it is a bug and we want to hear
 about it.
