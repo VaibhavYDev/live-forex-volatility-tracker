@@ -56,7 +56,7 @@ from fx_core.alerts.hysteresis import (
     TriggerSnapshot,
 )
 from fx_core.alerts.seasonality import DiurnalProfile, DiurnalSnapshot
-from fx_core.calendar import is_market_open
+from fx_core.calendar import in_rollover_window, is_market_open
 
 __all__ = ["DetectorConfig", "DetectorSnapshot", "RegimeDetector"]
 
@@ -74,12 +74,20 @@ class DetectorConfig:
     # How long after a session open before alerts are armed. Long enough for the
     # reopen to settle, short enough that Sunday evening is not dead to us.
     session_warmup: timedelta = timedelta(minutes=30)
+    # Bars starting this long after 17:00 New York are not evaluated (0 disables).
+    # The daily rollover widens spreads for about an hour, and the mid of those
+    # quotes swings with the spread rather than the price: on 2026-10-25 GBPUSD's
+    # realised variance per minute was ~80x its post-midnight level while its median
+    # spread was 9.5 pips. Scoring it raised a "stressed" regime from quote noise.
+    rollover_gate: timedelta = timedelta(hours=1)
     # Contiguous evaluable bars required after ANY gate before re-arming.
     rearm_bars: int = 3
 
     def __post_init__(self) -> None:
         if self.session_warmup < timedelta(0):
             raise ValueError("session_warmup must not be negative")
+        if self.rollover_gate < timedelta(0):
+            raise ValueError("rollover_gate must not be negative")
         if self.rearm_bars < 0:
             raise ValueError("rearm_bars must not be negative")
 
@@ -199,15 +207,17 @@ class RegimeDetector:
 
         if not open_now:
             return "market closed"
-        if self._opened_at is not None and (ts - self._opened_at) < self.config.session_warmup:
-            return "session warm-up"
-        if is_gap_bar:
-            return "session gap bar"
-        if is_backfill:
-            return "backfilled bar"
-        if stale:
-            return "feed stale"
-        return None
+        gates = (
+            (in_rollover_window(ts, self.config.rollover_gate), "rollover hour"),
+            (
+                self._opened_at is not None and (ts - self._opened_at) < self.config.session_warmup,
+                "session warm-up",
+            ),
+            (is_gap_bar, "session gap bar"),
+            (is_backfill, "backfilled bar"),
+            (stale, "feed stale"),
+        )
+        return next((reason for applies, reason in gates if applies), None)
 
     # ----------------------------------------------------------- rehydration
     def snapshot(self) -> DetectorSnapshot:

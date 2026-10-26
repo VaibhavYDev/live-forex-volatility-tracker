@@ -33,6 +33,7 @@ __all__ = [
     "SESSIONS",
     "Session",
     "active_sessions",
+    "in_rollover_window",
     "is_market_open",
     "next_close",
     "next_open",
@@ -120,6 +121,20 @@ def seconds_until_open(ts: datetime | None = None) -> float:
     if is_market_open(ts):
         return 0.0
     return (next_open(ts) - ts).total_seconds()
+
+
+def in_rollover_window(ts: datetime | None = None, length: timedelta = timedelta(hours=1)) -> bool:
+    """True during the ``length`` after 17:00 New York, the daily rollover.
+
+    Every day at 17:00 New York the interbank day rolls: liquidity providers step
+    back, spreads widen and quotes thin out or stop for minutes at a time. Measured
+    on the 2026-10-25 Sunday open, GBPUSD's median spread was 9.5 pips from 21:30 to
+    21:40 UTC against 0.2-0.5 pips after 22:00, and every pair had silences of over
+    a minute. Silence and quote noise in this window are the market, not a fault.
+    """
+    local = (ts or datetime.now(UTC)).astimezone(NY)
+    start = datetime.combine(local.date(), _WEEK_BOUNDARY, tzinfo=NY)
+    return start <= local < start + length
 
 
 def active_sessions(ts: datetime | None = None) -> tuple[str, ...]:

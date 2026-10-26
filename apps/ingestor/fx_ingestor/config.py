@@ -24,6 +24,11 @@ class IngestorSettings(BaseSettings):
     lease_ttl_ms: int = Field(default=10_000, alias="FX_LEASE_TTL_MS")
     lease_renew_ms: int = Field(default=3_000, alias="FX_LEASE_RENEW_MS")
     staleness_timeout_s: float = Field(default=30.0, alias="FX_STALENESS_TIMEOUT_S")
+    # The limit inside the hour after 17:00 New York, when the market is often silent
+    # for minutes (see StalenessWatchdog). A dead socket there is caught within it.
+    staleness_timeout_rollover_s: float = Field(
+        default=300.0, alias="FX_STALENESS_TIMEOUT_ROLLOVER_S"
+    )
     backoff_base_s: float = Field(default=0.5, alias="FX_BACKOFF_BASE_S")
     backoff_cap_s: float = Field(default=60.0, alias="FX_BACKOFF_CAP_S")
     breaker_fail_threshold: int = Field(default=5, alias="FX_BREAKER_FAIL_THRESHOLD")
@@ -31,6 +36,9 @@ class IngestorSettings(BaseSettings):
 
     bucket_seconds: int = Field(default=60, alias="FX_BUCKET_SECONDS")
     ewma_lambda: float = Field(default=0.97, alias="FX_EWMA_LAMBDA")
+    # Minutes after 17:00 New York in which the regime detector does not score bars
+    # (fx_core.alerts.DetectorConfig.rollover_gate); 0 scores the rollover too.
+    rollover_gate_min: int = Field(default=60, ge=0, le=180, alias="FX_ROLLOVER_GATE_MIN")
     metrics_port: int = Field(default=9100, alias="FX_INGESTOR_METRICS_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import structlog
 from fx_core import keys
+from fx_core.alerts import DetectorConfig
 from fx_platform import LeaderLease, close_redis, configure_logging, make_redis, serve_metrics
 from pydantic import ValidationError
 from redis.exceptions import RedisError
@@ -71,6 +72,7 @@ class Ingestor:
             bucket_seconds=cfg.bucket_seconds,
             ewma_lambda=cfg.ewma_lambda,
             retention_s=cfg.stream_retention_s,
+            detector_config=DetectorConfig(rollover_gate=timedelta(minutes=cfg.rollover_gate_min)),
             quota=self.quota,
         )
         self.lease = LeaderLease(
@@ -151,7 +153,11 @@ class Ingestor:
             self._force_reconnect.clear()
             quoted = False
 
-            async with StalenessWatchdog(self.cfg.staleness_timeout_s, on_stale) as watchdog:
+            async with StalenessWatchdog(
+                self.cfg.staleness_timeout_s,
+                on_stale,
+                rollover_timeout_s=self.cfg.staleness_timeout_rollover_s,
+            ) as watchdog:
                 async for tick in provider.stream():
                     watchdog.pet()
                     await self.pipeline.handle(tick)

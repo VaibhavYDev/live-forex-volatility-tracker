@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import structlog
-from fx_core.calendar import is_market_open, seconds_until_open
+from fx_core.calendar import in_rollover_window, is_market_open, seconds_until_open
 
 log = structlog.get_logger(__name__)
 
@@ -115,7 +115,14 @@ class CircuitBreaker:
 
 
 class StalenessWatchdog:
-    """Fires when no data has arrived for ``timeout_s`` *while the market is open*."""
+    """Fires when no data has arrived for ``timeout_s`` *while the market is open*.
+
+    During the daily 17:00 New York rollover the market itself goes quiet for
+    minutes at a time, so the limit there is ``rollover_timeout_s`` instead. At the
+    2026-10-25 Sunday open a 30 s limit forced four reconnects between 21:00 and
+    21:03 UTC on a healthy socket: no frame of any kind arrived while every pair
+    was silent, and the feed sends no heartbeat that could have reset the clock.
+    """
 
     def __init__(
         self,
@@ -123,14 +130,18 @@ class StalenessWatchdog:
         on_stale: Callable[[], Awaitable[None]],
         check_interval_s: float = 1.0,
         market_is_open: Callable[[], bool] = is_market_open,
+        rollover_timeout_s: float | None = None,
+        in_rollover: Callable[[], bool] = in_rollover_window,
     ) -> None:
         self._timeout_s = timeout_s
+        self._rollover_timeout_s = timeout_s if rollover_timeout_s is None else rollover_timeout_s
         self._on_stale = on_stale
         self._check_interval_s = check_interval_s
         # Injected so tests can exercise both branches deterministically. A test
         # suite whose result depends on what day it is run is not a test suite -
         # this one would silently stop testing anything every weekend.
         self._market_is_open = market_is_open
+        self._in_rollover = in_rollover
         self._last_data = time.monotonic()
         self._task: asyncio.Task[None] | None = None
         self.trips = 0
@@ -162,7 +173,8 @@ class StalenessWatchdog:
                 await asyncio.sleep(sleep_s)
                 continue
 
-            if self.idle_s > self._timeout_s:
+            limit = self._rollover_timeout_s if self._in_rollover() else self._timeout_s
+            if self.idle_s > limit:
                 self.trips += 1
                 log.warning("watchdog.stale", idle_s=round(self.idle_s, 1), trips=self.trips)
                 self.pet()  # reset before the callback so we do not fire in a loop
