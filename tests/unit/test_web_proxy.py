@@ -46,3 +46,22 @@ def test_the_websocket_upgrade_and_timeouts_are_kept() -> None:
         "proxy_buffering off;",
     ):
         assert directive in ws, f"/ws/ lost `{directive}`"
+
+
+def test_each_visitor_is_limited_by_their_own_address() -> None:
+    # One looping tab or script must not take the API or the socket fan-out away
+    # from everyone else - and behind the TLS terminator every request arrives from
+    # one container address, so the limits key on the forwarded client address.
+    text = CONF.read_text()
+    assert re.search(r"limit_req_zone\s+\$binary_remote_addr\s+zone=fx_api:", text)
+    assert re.search(r"limit_conn_zone\s+\$binary_remote_addr\s+zone=fx_ws:", text)
+    assert re.search(r"real_ip_header\s+X-Forwarded-For;", text)
+    for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        assert f"set_real_ip_from {net};" in text
+    assert "set_real_ip_from 0.0.0.0/0" not in text, "any client could claim any address"
+    api = _location(text, "/api/")
+    assert re.search(r"limit_req\s+zone=fx_api\b", api)
+    assert "limit_req_status 429;" in api
+    ws = _location(text, "/ws/")
+    assert re.search(r"limit_conn\s+fx_ws\s+\d+;", ws)
+    assert "limit_conn_status 429;" in ws

@@ -22,6 +22,7 @@ import pydantic
 import structlog
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter
 
 from fx_api.deps import get_manager, get_redis, get_settings, get_tickets
 from fx_api.ratelimit import client_id, hit
@@ -37,6 +38,8 @@ from fx_api.ws.protocol import (
 
 log = structlog.get_logger(__name__)
 router = APIRouter(tags=["stream"])
+
+WS_REFUSED_FULL = Counter("fx_ws_refused_full_total", "Sockets refused at the client cap")
 
 
 @router.post("/ws/ticket")
@@ -116,17 +119,31 @@ async def _drop_slow_client(ws: WebSocket, session: ClientSession, cause: str) -
         await asyncio.wait_for(ws.close(CloseCode.SLOW_CLIENT, "client too slow"), timeout=1.0)
 
 
+async def _admit(ws: WebSocket, ticket: str) -> bool:
+    """Close the socket before accepting it when it may not join; True if it may.
+
+    The cap comes first, so a refused client keeps its ticket for the retry. One
+    socket past the cap is refused (1013, try again later) rather than slowing
+    every client already admitted.
+    """
+    settings = get_settings()
+    if get_manager().client_count >= settings.ws_max_clients:
+        WS_REFUSED_FULL.inc()
+        await ws.close(CloseCode.TRY_AGAIN_LATER, "server at capacity")
+        return False
+    if settings.require_ws_ticket and await get_tickets().redeem(ticket) is None:
+        await ws.close(CloseCode.UNAUTHORISED, "invalid or expired ticket")
+        return False
+    return True
+
+
 @router.websocket("/ws/stream")
 async def stream(ws: WebSocket, ticket: str = Query(default="")) -> None:
     settings = get_settings()
     manager = get_manager()
-    tickets = get_tickets()
 
-    if settings.require_ws_ticket:
-        subject = await tickets.redeem(ticket)
-        if subject is None:
-            await ws.close(CloseCode.UNAUTHORISED, "invalid or expired ticket")
-            return
+    if not await _admit(ws, ticket):
+        return
 
     await ws.accept()
     session = ClientSession(client_id=str(uuid.uuid4()))

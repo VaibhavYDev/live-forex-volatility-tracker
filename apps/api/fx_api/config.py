@@ -33,6 +33,13 @@ class ApiSettings(BaseSettings):
     # Feed is considered stale if the ingestor has not said "healthy" recently.
     # /readyz fails on this, so a replica with a dead feed stops taking traffic.
     feed_stale_after_s: float = Field(default=60.0, alias="FX_FEED_STALE_AFTER_S")
+    # /api/health: how far the tick persister may fall behind the stream, and whether
+    # its absence is a fault (the full stack runs one; a cache-only setup does not).
+    monitor_max_worker_lag: int = Field(default=2_000, alias="FX_MONITOR_MAX_WORKER_LAG")
+    monitor_require_worker: bool = Field(default=True, alias="FX_MONITOR_REQUIRE_WORKER")
+    # Concurrent dashboard sockets this replica serves; one more is refused with
+    # 1013 (try again later) rather than slowing every existing client.
+    ws_max_clients: int = Field(default=200, ge=1, alias="FX_WS_MAX_CLIENTS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @property

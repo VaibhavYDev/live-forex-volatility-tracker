@@ -27,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 from fx_api.config import ApiSettings
 from fx_api.main import create_app
+from fx_api.routers import health
 from fx_api.routers import stream as stream_router
 from fx_api.routers.market import _Cache, _compare_cache
 from fx_api.ws.manager import ConnectionManager
@@ -154,6 +155,112 @@ class TestHealth:
         r = client.get("/metrics")
         assert r.status_code == 200
         assert "fx_ws_clients" in r.text or "python_info" in r.text
+
+
+class TestMonitor:
+    """/api/health: what an external uptime monitor polls, judged by the calendar."""
+
+    @staticmethod
+    def _market(monkeypatch: pytest.MonkeyPatch, *, is_open: bool, rollover: bool = False) -> None:
+        monkeypatch.setattr(health, "is_market_open", lambda _ts=None: is_open)
+        monkeypatch.setattr(health, "in_rollover_window", lambda _ts=None: rollover)
+
+    @staticmethod
+    def _worker(redis: Any, behind: int = 0, lease: bool = True) -> None:
+        redis.xgroup_create(keys.STREAM_TICKS, keys.CONSUMER_GROUP, id="$", mkstream=True)
+        if lease:
+            redis.set(keys.PERSISTER_LEASE, "worker-under-test", px=10_000)
+        for _ in range(behind):
+            redis.xadd(keys.STREAM_TICKS, {"s": SYMBOL, "b": "1", "a": "1", "t": "x"})
+
+    def test_a_closed_market_with_a_live_ingestor_is_healthy(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._market(monkeypatch, is_open=False)
+        self._worker(redis_sync)
+        seed_feed(redis_sync, "connecting")
+        r = client.get("/api/health")
+        assert r.status_code == 200, r.json()
+        assert r.json()["ok"] is True and r.json()["market_open"] is False
+
+    def test_no_heartbeat_is_a_fault_even_at_the_weekend(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dead ingestor on Saturday will not connect on Sunday either.
+        self._market(monkeypatch, is_open=False)
+        self._worker(redis_sync)
+        r = client.get("/api/health")
+        assert r.status_code == 503
+        assert "no ingestor heartbeat" in r.json()["problems"]
+
+    def test_an_open_market_needs_a_healthy_feed(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._market(monkeypatch, is_open=True)
+        self._worker(redis_sync)
+        seed_feed(redis_sync, "connecting")
+        r = client.get("/api/health")
+        assert r.status_code == 503
+        assert r.json()["problems"] == ["feed connecting while the market is open"]
+
+    def test_waiting_for_the_first_quote_of_the_rollover_is_normal(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # At the Sunday open every pair can be silent for minutes.
+        self._market(monkeypatch, is_open=True, rollover=True)
+        self._worker(redis_sync)
+        seed_feed(redis_sync, "connecting")
+        assert client.get("/api/health").status_code == 200
+
+    def test_a_worker_that_stopped_draining_is_a_fault(
+        self, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("REDIS_URL", REDIS_URL)
+        monkeypatch.setenv(TICKET_REQUIRED_ENV, "0")
+        monkeypatch.setenv("FX_MONITOR_MAX_WORKER_LAG", "5")
+        self._market(monkeypatch, is_open=True)
+        self._worker(redis_sync, behind=6)
+        seed_feed(redis_sync, "healthy")
+        with TestClient(create_app()) as c:
+            r = c.get("/api/health")
+        assert r.status_code == 503
+        assert r.json()["worker"] == {"lag": 6, "pending": 0}
+        assert r.json()["problems"] == ["worker 6 ticks behind"]
+
+    def test_a_missing_persister_is_a_fault(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._market(monkeypatch, is_open=True)
+        seed_feed(redis_sync, "healthy")
+        r = client.get("/api/health")
+        assert r.status_code == 503
+        assert r.json()["worker"] == "absent"
+
+    def test_a_dead_worker_is_caught_by_its_lease_not_its_lag(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # In a quiet market lag barely grows; the lease expires within its TTL.
+        self._market(monkeypatch, is_open=True)
+        self._worker(redis_sync, lease=False)
+        seed_feed(redis_sync, "healthy")
+        r = client.get("/api/health")
+        assert r.status_code == 503
+        assert r.json()["problems"] == ["no tick persister holds the lease"]
+
+    def test_a_healthy_open_market(
+        self, client: TestClient, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._market(monkeypatch, is_open=True)
+        self._worker(redis_sync)
+        seed_feed(redis_sync, "healthy")
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and body["problems"] == []
+        assert body["feed"]["state"] == "healthy" and body["worker"] == {"lag": 0, "pending": 0}
+        assert not ({"bid", "ask", "mid", "price"} & set(json.dumps(body).split('"'))), (
+            "monitor leaks a price"
+        )
 
 
 class TestMarketRest:
@@ -590,6 +697,25 @@ class TestWebSocketProtocol:
             ws.send_json({"op": "unsubscribe", "symbols": [SYMBOL]})
             ws.send_json({"op": "ping"})
             assert ws.receive_json()["type"] == "pong"
+
+
+class TestClientCap:
+    def test_one_more_socket_than_the_cap_is_refused(
+        self, redis_sync: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("REDIS_URL", REDIS_URL)
+        monkeypatch.setenv(TICKET_REQUIRED_ENV, "0")
+        monkeypatch.setenv("FX_WS_MAX_CLIENTS", "1")
+        with TestClient(create_app()) as c, c.websocket_connect("/ws/stream") as first:
+            assert first.receive_json()["type"] == "hello"
+            with (
+                pytest.raises(WebSocketDisconnect) as refused,
+                c.websocket_connect("/ws/stream") as ws,
+            ):
+                ws.receive_json()
+            assert refused.value.code == CloseCode.TRY_AGAIN_LATER
+            first.send_json({"op": "ping"})
+            assert first.receive_json()["type"] == "pong", "the admitted client was disturbed"
 
 
 class TestSlowClients:
